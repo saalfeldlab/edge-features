@@ -119,13 +119,15 @@ class Histogram @JvmOverloads constructor(
             min = this.min,
             max = this.max,
             count=this.count,
-            overflow = this.overflow,
-            underflow = this.underflow,
+            overflow = this.overflow.toDouble() / count,
+            underflow = this.underflow.toDouble() / count,
             normalizedValues = normalizeCounts(this.count, this.bins))
 
     companion object {
         private fun normalizeCounts(count: Long, bins: LongArray) = DoubleArray(bins.size) {bins[it].toDouble() / count}
     }
+
+    fun toDoubleArray() = normalized().toDoubleArray()
 
 }
 
@@ -134,10 +136,12 @@ class NormalizedHistogram(
         val max: Double,
         private val normalizedValues: DoubleArray,
         val count: Long,
-        val overflow: Long,
-        val underflow: Long) {
+        val overflow: Double,
+        val underflow: Double) {
 
     operator fun get(index: Int): Double {
         return this.normalizedValues[index]
     }
+
+    fun toDoubleArray(): DoubleArray = normalizedValues + doubleArrayOf(min, max, count.toDouble(), overflow, underflow)
 }

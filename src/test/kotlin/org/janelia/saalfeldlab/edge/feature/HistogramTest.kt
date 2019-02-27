@@ -57,8 +57,8 @@ class HistogramTest {
 
         val normalized = histogram.normalized()
 
-        Assert.assertEquals(1, normalized.underflow)
-        Assert.assertEquals(2, normalized.overflow)
+        Assert.assertEquals(1.0 / data.size, normalized.underflow, 0.0)
+        Assert.assertEquals(2.0 / data.size, normalized.overflow, 0.0)
         Assert.assertEquals(data.size.toLong(), normalized.count)
         Assert.assertEquals(2.0 / data.size, normalized[0], 0.0)
         Assert.assertEquals(0.0, normalized[1], 0.0)
