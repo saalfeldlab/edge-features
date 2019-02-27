@@ -1,0 +1,276 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<parent>
+		<groupId>org.scijava</groupId>
+		<artifactId>pom-scijava</artifactId>
+		<version>25.0.0</version>
+	</parent>
+
+	<groupId>org.janelia.saalfeldlab</groupId>
+	<artifactId>edge-features</artifactId>
+	<version>0.1.0-SNAPSHOT</version>
+
+	<name>Edge Features</name>
+	<description>Spark based tools edge feature extraction.</description>
+	<url>https://github.com/saalfeldlab/label-utilities-spark</url>
+	<inceptionYear>2019</inceptionYear>
+	<!-- <organization>saalfeldlab</organization> -->
+	<organization>
+		<name>Saalfeld Lab</name>
+		<url>http://saalfeldlab.janelia.org/</url>
+	</organization>
+	<licenses>
+		<license>
+			<name>Simplified BSD License</name>
+			<distribution>repo</distribution>
+		</license>
+	</licenses>
+
+	<mailingLists>
+		<mailingList>
+			<name>ImageJ Forum</name>
+			<archive>http://forum.image.sc/</archive>
+		</mailingList>
+	</mailingLists>
+
+	<developers>
+		<developer>
+			<id>hanslovsky</id>
+			<name>Philipp Hanslovsky</name>
+			<url>http://imagej.net/User:Hanslovsky</url>
+			<roles>
+				<role>founder</role>
+				<role>lead</role>
+				<role>developer</role>
+				<role>debugger</role>
+				<role>reviewer</role>
+				<role>support</role>
+				<role>maintainer</role>
+			</roles>
+		</developer>
+	</developers>
+
+	<contributors>
+		<contributor>
+			<name>None</name>
+		</contributor>
+	</contributors>
+
+	<scm>
+		<connection>scm:git:git://github.com/saalfeldlab/edge-features</connection>
+		<developerConnection>scm:git:git@github.com:saalfeldlab/edge-features</developerConnection>
+		<tag>HEAD</tag>
+		<url>https://github.com/saalfeldlab/edge-features</url>
+	</scm>
+	<issueManagement>
+		<system>GitHub Issues</system>
+		<url>https://github.com/saalfeldlab/edge-features/issues</url>
+	</issueManagement>
+	<ciManagement>
+		<system>Travis CI</system>
+		<url>https://travis-ci.org/saalfeldlab/edge-features</url>
+	</ciManagement>
+
+
+	<properties>
+		<scijava.jvm.version>1.8</scijava.jvm.version>
+		<allowedDuplicateClasses>*</allowedDuplicateClasses>
+
+		<license.licenseName>bsd_2</license.licenseName>
+		<license.copyrightOwners>Stephan Saalfeld</license.copyrightOwners>
+
+		<!-- NB: Deploy releases to the ImageJ Maven repository. -->
+		<releaseProfiles>deploy-to-imagej</releaseProfiles>
+
+		<imglib2-algorithm.version>0.11.1</imglib2-algorithm.version>
+	</properties>
+
+	<repositories>
+		<repository>
+			<id>imagej.public</id>
+			<url>http://maven.imagej.net/content/groups/public</url>
+		</repository>
+	</repositories>
+
+	<dependencies>
+		<dependency>
+			<groupId>org.jetbrains.kotlin</groupId>
+			<artifactId>kotlin-stdlib-jdk8</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.jetbrains.kotlin</groupId>
+			<artifactId>kotlin-reflect</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.apache.spark</groupId>
+			<artifactId>spark-core_2.11</artifactId>
+			<version>2.4.0</version>
+		</dependency>
+		<dependency>
+			<groupId>net.imglib2</groupId>
+			<artifactId>imglib2</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>net.imglib2</groupId>
+			<artifactId>imglib2-cache</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.janelia.saalfeldlab</groupId>
+			<artifactId>n5</artifactId>
+			<version>2.0.2</version>
+		</dependency>
+		<dependency>
+			<groupId>org.janelia.saalfeldlab</groupId>
+			<artifactId>n5-imglib2</artifactId>
+			<version>3.0.0</version>
+		</dependency>
+		<dependency>
+			<groupId>info.picocli</groupId>
+			<artifactId>picocli</artifactId>
+			<version>3.9.0</version>
+		</dependency>
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-api</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>pl.touk</groupId>
+			<artifactId>throwing-function</artifactId>
+			<version>1.3</version>
+		</dependency>
+
+		<!-- test -->
+		<dependency>
+			<groupId>junit</groupId>
+			<artifactId>junit</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.slf4j</groupId>
+			<artifactId>slf4j-simple</artifactId>
+			<scope>test</scope>
+		</dependency>
+
+	</dependencies>
+
+	<profiles>
+		<profile>
+			<id>fatWithSpark</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-shade-plugin</artifactId>
+						<version>3.1.0</version>
+						<configuration>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<shadedArtifactId>${project.artifactId}</shadedArtifactId>
+							<shadedArtifactAttached>true</shadedArtifactAttached>
+							<!-- Do not minimize for now to speed up packaging. -->
+							<!-- <minimzeJar>true</minimzeJar> -->
+
+							<relocations>
+								<relocation>
+									<pattern>org.apache.commons.compress</pattern>
+									<shadedPattern>org.janelia.saalfeldlab.org.apache.commons.compress</shadedPattern>
+								</relocation>
+							</relocations>
+						</configuration>
+						<executions>
+							<execution>
+								<phase>package</phase>
+								<goals>
+									<goal>shade</goal>
+								</goals>
+								<configuration>
+									<transformers>
+										<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+											<mainClass>org.janelia.saalfeldlab.label.spark.LabelTools</mainClass>
+										</transformer>
+									</transformers>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+
+		<profile>
+			<id>fat</id>
+			<dependencies>
+				<dependency>
+					<groupId>org.apache.spark</groupId>
+					<artifactId>spark-core_2.11</artifactId>
+					<version>2.1.0</version>
+					<scope>provided</scope>
+				</dependency>
+			</dependencies>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-shade-plugin</artifactId>
+						<version>3.1.0</version>
+						<configuration>
+							<filters>
+								<filter>
+									<artifact>*:*</artifact>
+									<excludes>
+										<exclude>META-INF/*.SF</exclude>
+										<exclude>META-INF/*.DSA</exclude>
+										<exclude>META-INF/*.RSA</exclude>
+									</excludes>
+								</filter>
+							</filters>
+							<artifactSet>
+								<excludes>
+									<exclude>*hadoop*</exclude>
+									<exclude>*spark*</exclude>
+									<exclude>*scala*</exclude>
+								</excludes>
+							</artifactSet>
+							<shadedArtifactId>${project.artifactId}</shadedArtifactId>
+							<shadedArtifactAttached>true</shadedArtifactAttached>
+							<!-- Do not minimize for now to speed up packaging. -->
+							<!-- <minimzeJar>true</minimzeJar> -->
+
+							<relocations>
+								<relocation>
+									<pattern>org.apache.commons.compress</pattern>
+									<shadedPattern>org.janelia.saalfeldlab.org.apache.commons.compress</shadedPattern>
+								</relocation>
+							</relocations>
+						</configuration>
+						<executions>
+							<execution>
+								<phase>package</phase>
+								<goals>
+									<goal>shade</goal>
+								</goals>
+								<configuration>
+									<transformers>
+										<transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+											<mainClass>org.janelia.saalfeldlab.label.spark.LabelTools</mainClass>
+										</transformer>
+									</transformers>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
+
+</project>
