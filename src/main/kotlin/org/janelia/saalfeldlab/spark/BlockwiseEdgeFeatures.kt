@@ -107,7 +107,6 @@ fun updateFeatureBlocks(
 
     N5Utils.save(edgesRai, edgesContainer, edgesDataset, intArrayOf(2, numEdgesPerBlock), GzipCompression())
 
-}
 
 
 }
