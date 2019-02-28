@@ -32,10 +32,8 @@ import org.janelia.saalfeldlab.n5.imglib2.N5Utils
 import org.janelia.saalfeldlab.util.computeIfAbsent
 import org.slf4j.LoggerFactory
 import scala.Tuple2
-import scala.Tuple3
 import java.lang.invoke.MethodHandles
 import java.nio.ByteBuffer
-import java.util.function.Consumer
 import kotlin.random.Random
 
 private val LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())
@@ -54,86 +52,92 @@ class N5IO(
 
 class FeatureAndName(val feature: () -> DoubleStatisticsFeature<*>, val name: String)
 
-fun updateFeatureBlocks(
-        sc: JavaSparkContext,
-        n5io: () -> N5IO,
-        superBlocks: List<Interval>,
-        dimensions: LongArray,
-        blockSize: IntArray,
-        vararg features: () -> DoubleStatisticsFeature<*>,
-        numEdgesPerBlock: Int = 1 shl 16) {
+class BlockwiseEdgeFeatures {
 
-    val edges = TLongObjectHashMap<TLongSet>()
-    val perBlockEdges = sc
-            .parallelize(superBlocks.map { Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) })
-            .map {
+    companion object {
 
-                val grid = CellGrid(dimensions, blockSize)
-                val blockPos = LongArray(grid.numDimensions())
-                val edgeMap = TLongObjectHashMap<TLongHashSet>()
-                LOG.info("Super block ({} {}) for block size {}", it._1(), it._2(), blockSize)
+        fun updateFeatureBlocks(
+                sc: JavaSparkContext,
+                n5io: () -> N5IO,
+                superBlocks: List<Interval>,
+                dimensions: LongArray,
+                blockSize: IntArray,
+                vararg features: () -> DoubleStatisticsFeature<*>,
+                numEdgesPerBlock: Int = 1 shl 16) {
 
-                Grids.collectAllContainedIntervals(it._1(), it._2(), blockSize).forEach { block ->
-                    LOG.info("Extracting features for block {} inside superblock ({} {})", block, it._1(), it._2())
-                    block.min(blockPos)
-                    grid.getCellPosition(blockPos, blockPos)
-                    val weights = Views.extendValue(N5Utils.open<FloatType>(n5io().weightsContainer, n5io().weightsDataset), FloatType(Float.NaN))
-                    val labels = Views.extendValue(N5Utils.open<UnsignedLongType>(n5io().labelsContainer, n5io().labelsDataset), UnsignedLongType(Label.INVALID))
-                    val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features = *features)
-                    edgeFeatures.forEachEntry { key, values -> edgeMap.computeIfAbsent(key) { TLongHashSet() }.addAll(values.keySet()); true }
-                    LOG.info("Edge features: {}", edgeFeatures)
-                    // TLongObjectHashMap$KeyView does not have closing curly brace in string representation!!
-                    LOG.info("Edge map: {}", edgeMap)
+            val edges = TLongObjectHashMap<TLongSet>()
+            val perBlockEdges = sc
+                    .parallelize(superBlocks.map { Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) })
+                    .map {
 
-                    var requiredSize = 0
-                    edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> requiredSize += 2 * java.lang.Long.BYTES + features.map(DoubleStatisticsFeature<*>::numBytes).sum(); true }; true }
-                    val blockData = ByteArray(requiredSize)
-                    val buffer = ByteBuffer.wrap(blockData)
-                    edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> buffer.putLong(e1); buffer.putLong(e2); features.forEach { it.serializeInto(buffer) }; true }; true }
-                    buffer.rewind()
-                    val dataBlock = ByteArrayDataBlock(Intervals.dimensionsAsIntArray(block), blockPos, blockData)
-                    n5io().featureBlockContainer.writeBlock(n5io().featureBlockDataset, n5io().featureBlockContainer.getDatasetAttributes(n5io().featureBlockDataset), dataBlock)
-                }
+                        val grid = CellGrid(dimensions, blockSize)
+                        val blockPos = LongArray(grid.numDimensions())
+                        val edgeMap = TLongObjectHashMap<TLongHashSet>()
+                        LOG.info("Super block ({} {}) for block size {}", it._1(), it._2(), blockSize)
 
-                edgeMap
+                        Grids.collectAllContainedIntervals(it._1(), it._2(), blockSize).forEach { block ->
+                            LOG.info("Extracting features for block {} inside superblock ({} {})", block, it._1(), it._2())
+                            block.min(blockPos)
+                            grid.getCellPosition(blockPos, blockPos)
+                            val weights = Views.extendValue(N5Utils.open<FloatType>(n5io().weightsContainer, n5io().weightsDataset), FloatType(Float.NaN))
+                            val labels = Views.extendValue(N5Utils.open<UnsignedLongType>(n5io().labelsContainer, n5io().labelsDataset), UnsignedLongType(Label.INVALID))
+                            val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features = *features)
+                            edgeFeatures.forEachEntry { key, values -> edgeMap.computeIfAbsent(key) { TLongHashSet() }.addAll(values.keySet()); true }
+                            LOG.info("Edge features: {}", edgeFeatures)
+                            // TLongObjectHashMap$KeyView does not have closing curly brace in string representation!!
+                            LOG.info("Edge map: {}", edgeMap)
+
+                            var requiredSize = 0
+                            edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> requiredSize += 2 * java.lang.Long.BYTES + features.map(DoubleStatisticsFeature<*>::numBytes).sum(); true }; true }
+                            val blockData = ByteArray(requiredSize)
+                            val buffer = ByteBuffer.wrap(blockData)
+                            edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> buffer.putLong(e1); buffer.putLong(e2); features.forEach { it.serializeInto(buffer) }; true }; true }
+                            buffer.rewind()
+                            val dataBlock = ByteArrayDataBlock(Intervals.dimensionsAsIntArray(block), blockPos, blockData)
+                            n5io().featureBlockContainer.writeBlock(n5io().featureBlockDataset, n5io().featureBlockContainer.getDatasetAttributes(n5io().featureBlockDataset), dataBlock)
+                        }
+
+                        edgeMap
+                    }
+                    .collect()
+            perBlockEdges.forEach { it.forEachEntry { a, b -> edges.computeIfAbsent(a, { TLongHashSet() }).addAll(b); true } }
+            val edgesContainer = n5io().edgesContainer
+            val edgesDataset = n5io().edgesDataset
+            if (edgesContainer.datasetExists(edgesDataset)) {
+                val cursor = Views.flatIterable(N5Utils.open<UnsignedLongType>(edgesContainer, edgesDataset)).cursor()
+                while (cursor.hasNext())
+                    edges.computeIfAbsent(cursor.next().integerLong, { TLongHashSet() }).add(cursor.next().integerLong)
             }
-            .collect()
-    perBlockEdges.forEach { it.forEachEntry { a, b -> edges.computeIfAbsent(a, { TLongHashSet() }).addAll(b); true } }
-    val edgesContainer = n5io().edgesContainer
-    val edgesDataset = n5io().edgesDataset
-    if (edgesContainer.datasetExists(edgesDataset)) {
-        val cursor = Views.flatIterable(N5Utils.open<UnsignedLongType>(edgesContainer, edgesDataset)).cursor()
-        while (cursor.hasNext())
-            edges.computeIfAbsent(cursor.next().integerLong, { TLongHashSet() }).add(cursor.next().integerLong)
+
+            val edgeCount = edges.valueCollection().map { it.size() }.reduce { i1, i2 -> i1 + i2 }
+            val edgesRai = ArrayImgs.unsignedLongs(2L, edgeCount.toLong())
+            val edgesRaiCursor = Views.flatIterable(edgesRai).cursor()
+            edges.forEachEntry { e1, value -> value.forEach { edgesRaiCursor.next().setInteger(e1); edgesRaiCursor.next().setInteger(it); true }; true }
+
+            N5Utils.save(edgesRai, edgesContainer, edgesDataset, intArrayOf(2, numEdgesPerBlock), GzipCompression())
+        }
+
+        fun mergeFeatures(
+                sc: JavaSparkContext,
+                n5io: () -> N5IO,
+                vararg features: () -> DoubleStatisticsFeature<*>,
+                numEdgesPerBlock: Int = 1 shl 16) {
+
+            n5io().let {
+                val edgeDatasetAttributes = it.edgesContainer.getDatasetAttributes(it.edgesDataset)
+                val numDoubles = features.map { it().packedSizeInDoubles() }.reduce { i1, i2 -> i1 + i2 }
+                val numEdges = edgeDatasetAttributes.dimensions[1]
+                it.mergedFeaturesContainer.createDataset(it.mergedFeaturesDataset, longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock), DataType.FLOAT64, GzipCompression())
+                val edgeFeatureBlocks = Grids
+                        .collectAllContainedIntervals(longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock))
+                        .map { Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) }
+                sc
+                        .parallelize(edgeFeatureBlocks)
+                        .foreach(MergeEdgeFeatures(n5io, numEdgesPerBlock, *features))
+            }
+
+        }
     }
-
-    val edgeCount = edges.valueCollection().map { it.size() }.reduce { i1, i2 -> i1 + i2 }
-    val edgesRai = ArrayImgs.unsignedLongs(2L, edgeCount.toLong())
-    val edgesRaiCursor = Views.flatIterable(edgesRai).cursor()
-    edges.forEachEntry { e1, value -> value.forEach { edgesRaiCursor.next().setInteger(e1); edgesRaiCursor.next().setInteger(it); true }; true }
-
-    N5Utils.save(edgesRai, edgesContainer, edgesDataset, intArrayOf(2, numEdgesPerBlock), GzipCompression())
-}
-
-fun mergeFeatures(
-        sc: JavaSparkContext,
-        n5io: () -> N5IO,
-        vararg features: () -> DoubleStatisticsFeature<*>,
-        numEdgesPerBlock: Int = 1 shl 16) {
-
-    n5io().let {
-        val edgeDatasetAttributes = it.edgesContainer.getDatasetAttributes(it.edgesDataset)
-        val numDoubles = features.map { it().packedSizeInDoubles() }.reduce { i1, i2 -> i1 + i2 }
-        val numEdges = edgeDatasetAttributes.dimensions[1]
-        it.mergedFeaturesContainer.createDataset(it.mergedFeaturesDataset, longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock), DataType.FLOAT64, GzipCompression())
-        val edgeFeatureBlocks = Grids
-                .collectAllContainedIntervals(longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock))
-                .map { Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) }
-    sc
-            .parallelize(edgeFeatureBlocks)
-            .foreach(MergeEdgeFeatures(n5io, numEdgesPerBlock, *features))
-    }
-
 }
 
 fun main(args: Array<String>) {
@@ -171,8 +175,8 @@ fun main(args: Array<String>) {
             FinalInterval(LongArray(blockSize.size, {if (it == 0) blockSize[it].toLong() else 0L}), dims.map {it - 1}.toLongArray()))
 
     sc.use {
-        updateFeatureBlocks(it, n5io, blocks, dims, blockSize, *features)
-        mergeFeatures(it, n5io, *features, numEdgesPerBlock = 5)
+        BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, blocks, dims, blockSize, *features)
+        BlockwiseEdgeFeatures.mergeFeatures(it, n5io, *features, numEdgesPerBlock = 5)
     }
 
 
@@ -235,8 +239,7 @@ class MergeEdgeFeatures(
                 while (buffer.hasRemaining()) {
                     val k1 = buffer.long
                     val k2 = buffer.long
-                    val h = Histogram(5, max = 1.0001).let { it.deserializeFrom(buffer); it}
-                    featureMap.computeIfAbsent(k1) { TLongObjectHashMap() }.put(k2, listOf(h))
+                    featureMap.computeIfAbsent(k1) { TLongObjectHashMap() }.put(k2, features.map { val  f = it(); f.deserializeFrom(buffer); f })
                 }
 
                 for (index in edgeFeaturesList.indices) {
