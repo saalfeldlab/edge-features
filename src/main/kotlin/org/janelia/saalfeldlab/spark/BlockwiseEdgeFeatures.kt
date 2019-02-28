@@ -20,21 +20,14 @@ import org.apache.spark.api.java.function.VoidFunction
 import org.janelia.saalfeldlab.edge.feature.DoubleStatisticsFeature
 import org.janelia.saalfeldlab.edge.feature.Histogram
 import org.janelia.saalfeldlab.labels.Label
-import org.janelia.saalfeldlab.n5.ByteArrayDataBlock
-import org.janelia.saalfeldlab.n5.DataType
-import org.janelia.saalfeldlab.n5.DatasetAttributes
-import org.janelia.saalfeldlab.n5.GzipCompression
-import org.janelia.saalfeldlab.n5.N5FSReader
-import org.janelia.saalfeldlab.n5.N5FSWriter
-import org.janelia.saalfeldlab.n5.N5Reader
-import org.janelia.saalfeldlab.n5.N5Writer
+import org.janelia.saalfeldlab.n5.*
 import org.janelia.saalfeldlab.n5.imglib2.N5Utils
 import org.janelia.saalfeldlab.util.computeIfAbsent
 import org.slf4j.LoggerFactory
 import scala.Tuple2
 import java.lang.invoke.MethodHandles
 import java.nio.ByteBuffer
-import kotlin.random.Random
+import java.util.concurrent.Executors
 
 private val LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())
 
@@ -140,62 +133,36 @@ class BlockwiseEdgeFeatures {
     }
 }
 
-fun main(args: Array<String>) {
+fun main() {
 
-    val dims = longArrayOf(30, 40, 35)
-    val blockSize = dims.map { it.toInt() }.toIntArray()
-    blockSize[0] /= 2
-    val rng = Random(100L)
-    val randomLabels = ArrayImgs.unsignedLongs(*dims)
-    val randomEdges = ArrayImgs.floats(*dims)
-    randomLabels.forEach { it.setInteger(rng.nextLong(1, 11)) }
-    randomEdges.forEach { it.setReal(rng.nextFloat()) }
+    val readPath = "/nrs/saalfeld/hanslovskyp/experiments/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/predictions/lauritzen/02/workspace.n5"
+    val weightsDataset = "volumes/predictions/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/0/142000/affinities-averaged"
+    val attributes = N5FSReader(readPath).getDatasetAttributes(weightsDataset)
+    val dims = attributes.dimensions
+    val path = "${System.getProperty("user.home")}/.local/tmp/edge-features-with-io-executors.n5"
 
-    val path = "${System.getProperty("user.home")}/.local/tmp/edge-features.n5"
-    N5Utils.save(randomLabels, N5FSWriter(path), "labels", blockSize, GzipCompression())
-    N5Utils.save(randomEdges, N5FSWriter(path), "affinities", blockSize, GzipCompression())
-
-    N5FSWriter(path).createDataset("feature-blocks", dims, blockSize, DataType.INT8, GzipCompression())
+    N5FSWriter(path).createDataset("feature-blocks", dims, attributes.blockSize, DataType.INT8, GzipCompression())
 
     val features = arrayOf({Histogram(5,max=1.0001)})
 
     val conf = SparkConf().setAppName(MethodHandles.lookup().lookupClass().simpleName)
     val sc = JavaSparkContext(conf)
     val n5io = {N5IO(
-            weightsContainer = N5FSReader(path),
-            weightsDataset = "affinities",
-            labelsDataset = "labels",
+            weightsContainer = N5FSReader(readPath),
+            labelsContainer = N5FSReader(readPath),
+            weightsDataset = weightsDataset,
+            labelsDataset = "volumes/predictions/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/0/142000/watersheds/merge_threshold=0.75_seed_threshold=0.5/merged",
             featureBlockContainer = N5FSWriter(path),
             featureBlockDataset = "feature-blocks",
             edgesDataset = "edges",
             mergedFeaturesDataset = "edge-features"
     )}
-    val blocks = listOf(
-            FinalInterval(*LongArray(blockSize.size, {blockSize[it].toLong()})),
-            FinalInterval(LongArray(blockSize.size, {if (it == 0) blockSize[it].toLong() else 0L}), dims.map {it - 1}.toLongArray()))
+    val blocks = Grids.collectAllContainedIntervals(attributes.dimensions, attributes.blockSize.map { 3 * it }.toIntArray())
 
     sc.use {
-        BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, blocks, dims, blockSize, *features)
-        BlockwiseEdgeFeatures.mergeFeatures(it, n5io, *features, numEdgesPerBlock = 5)
+        BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, blocks, dims, attributes.blockSize, *features)
+        BlockwiseEdgeFeatures.mergeFeatures(it, n5io, *features)
     }
-
-
-    val featureMap = TLongObjectHashMap<TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>()
-    for (index in 0 .. 1) {
-        val dataBlock = N5FSReader(path).let { it.readBlock("feature-blocks", it.getDatasetAttributes("feature-blocks"), longArrayOf(index.toLong(), 0, 0)) as ByteArrayDataBlock }
-        val localFeatureMap = TLongObjectHashMap<TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>()
-        val buffer = ByteBuffer.wrap(dataBlock.data)
-        while (buffer.hasRemaining()) {
-            val k1 = buffer.long
-            val k2 = buffer.long
-            val h = Histogram(5, max = 1.0001).let { it.deserializeFrom(buffer); it}
-            localFeatureMap.computeIfAbsent(k1) { TLongObjectHashMap() }.put(k2, listOf(h))
-            featureMap.computeIfAbsent(k1) { TLongObjectHashMap() }.let { it.put(k2, listOf(it[k2]?.get(0)?.plusUnsafe(h) ?: h)) }
-        }
-        LOG.info("Block edge features: {}", localFeatureMap)
-    }
-
-    LOG.info("Edge features: {}", featureMap)
 
 }
 
@@ -228,11 +195,11 @@ class MergeEdgeFeatures(
             val edgeFeaturesList = List(edgeFeatures.dimension(1).toInt()) {features.map { it() }}
             val featureBlockDatasetAttributes = it.featureBlockContainer.getDatasetAttributes(it.featureBlockDataset)
             val featureBlockGrid = CellGrid(featureBlockDatasetAttributes.dimensions, featureBlockDatasetAttributes.blockSize)
-            LOG.info("Feature block grid is {}", featureBlockGrid)
+            LOG.debug("Feature block grid is {}", featureBlockGrid)
 
 
             Grids.forEachOffset(LongArray(featureBlockGrid.numDimensions(), {0}), featureBlockGrid.gridDimensions.map { it - 1 }.toLongArray(), IntArray(featureBlockGrid.numDimensions()) {1}) { blockPos ->
-                LOG.info("Loading block data for block position {}", blockPos)
+                LOG.debug("Loading block data for block position {}", blockPos)
                 val blockData = it.featureBlockContainer.readBlock(it.featureBlockDataset, featureBlockDatasetAttributes, blockPos) as ByteArrayDataBlock
                 val buffer = ByteBuffer.wrap(blockData.data)
                 val featureMap = TLongObjectHashMap<TLongObjectMap<List<DoubleStatisticsFeature<*>>>>()
