@@ -1,7 +1,10 @@
 package org.janelia.saalfeldlab.edge.feature
 
+import gnu.trove.map.TLongObjectMap
+import net.imglib2.type.numeric.RealType
 import net.imglib2.type.operators.ValueEquals
 import org.apache.commons.lang3.builder.ToStringBuilder
+import org.apache.commons.lang3.builder.ToStringStyle
 import java.util.Arrays
 import kotlin.math.floor
 
@@ -89,7 +92,7 @@ class Histogram @JvmOverloads constructor(
     }
 
     override fun toString(): String {
-        return ToStringBuilder(this)
+        return ToStringBuilder(this, ToStringStyle.SHORT_PREFIX_STYLE)
                 .append("nBins", nBins)
                 .append("min", min)
                 .append("max", max)
@@ -128,6 +131,12 @@ class Histogram @JvmOverloads constructor(
     }
 
     fun toDoubleArray() = normalized().toDoubleArray()
+
+    override fun numDoubles(): Int = bins.size + 5 // 5: min, max, count, overflow, underflow, cf: toDoubleArray().size
+
+    override fun <T : RealType<T>> serializeInto(target: Iterator<T>) = toDoubleArray().forEach { target.next().setReal(it) }
+
+
 
 }
 

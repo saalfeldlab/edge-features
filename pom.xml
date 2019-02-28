@@ -126,6 +126,11 @@
 			<version>3.0.0</version>
 		</dependency>
 		<dependency>
+			<groupId>org.janelia.saalfeldlab</groupId>
+			<artifactId>label-utilities</artifactId>
+			<version>0.4.1</version>
+		</dependency>
+		<dependency>
 			<groupId>info.picocli</groupId>
 			<artifactId>picocli</artifactId>
 			<version>3.9.0</version>
