@@ -61,6 +61,9 @@ interface Feature<F: Feature<F>> : ByteBufferSerializable, ByteBufferDeserializa
 
     @Throws(IncompatibleFeaturesException::class) operator fun plus(other: F): F
     @Throws(IncompatibleFeaturesException::class) operator fun plusAssign(other:F)
+    @Throws(IncompatibleFeaturesException::class) fun plusUnsafe(other: Feature<*>): F
+    @Throws(IncompatibleFeaturesException::class) fun plusUnsafeAssign(other: Feature<*>)
+
     fun pack(): DoubleSerializable
     fun packedSizeInDoubles(): Int
 
@@ -135,4 +138,4 @@ interface DoubleStatisticsFeature<F: DoubleStatisticsFeature<F>> : Feature<F> {
 
 }
 
-class IncompatibleFeaturesException(val f1: Feature<*>, val f2: Feature<*>, message: String? = "Features not compatible: $f1 and $f2") : Exception(message)
+class IncompatibleFeaturesException(val f1: Feature<*>, val f2: Feature<*>, message: String? = "Features not compatible: $f1 and $f2") : IllegalArgumentException(message)

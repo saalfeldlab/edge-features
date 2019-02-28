@@ -1,6 +1,5 @@
 package org.janelia.saalfeldlab.edge.feature
 
-import net.imglib2.type.numeric.RealType
 import net.imglib2.type.numeric.real.DoubleType
 import net.imglib2.type.operators.ValueEquals
 import org.apache.commons.lang3.builder.ToStringBuilder
@@ -82,13 +81,24 @@ class Histogram @JvmOverloads constructor(
         return newHist
     }
 
-    override fun plusAssign(that: Histogram) {
-        if (this.min != that.min || this.max != that.max || this.nBins != that.nBins)
-            throw IncompatibleFeaturesException(this, that, "Histograms disagree in min, max, or nBins: $this $that")
-        that.bins.forEachIndexed { index, binCount -> this.bins[index] += binCount }
-        this.count += that.count
-        this.underflow += that.underflow
-        this.overflow += that.overflow
+    override fun plusAssign(other: Histogram) {
+        if (this.min != other.min || this.max != other.max || this.nBins != other.nBins)
+            throw IncompatibleFeaturesException(this, other, "Histograms disagree in min, max, or nBins: $this $other")
+        other.bins.forEachIndexed { index, binCount -> this.bins[index] += binCount }
+        this.count += other.count
+        this.underflow += other.underflow
+        this.overflow += other.overflow
+    }
+    override fun plusUnsafe(other: Feature<*>): Histogram {
+        if (!(other is Histogram))
+            throw IncompatibleFeaturesException(this, other, "Cannot add feature of type ${other::class} to Histogram: $this $other")
+        return plus(other)
+    }
+
+    override fun plusUnsafeAssign(other: Feature<*>) {
+        if (!(other is Histogram))
+            throw IncompatibleFeaturesException(this, other, "Cannot add feature of type ${other::class} to Histogram: $this $other")
+        plusAssign(other)
     }
 
     override fun toString(): String {

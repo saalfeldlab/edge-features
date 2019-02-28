@@ -101,6 +101,7 @@ fun main(args: Array<String>) {
 
     val dims = longArrayOf(30, 40, 35)
     val blockSize = dims.map { it.toInt() }.toIntArray()
+    blockSize[0] /= 2
     val rng = Random(100L)
     val randomLabels = ArrayImgs.unsignedLongs(*dims)
     val randomEdges = ArrayImgs.floats(*dims)
@@ -123,16 +124,30 @@ fun main(args: Array<String>) {
             featureBlockDataset = "feature-blocks",
             edgesDataset = "edges"
     )}
+    val blocks = listOf(
+            Tuple2(FinalInterval(*LongArray(blockSize.size, {blockSize[it].toLong()})), longArrayOf(0, 0, 0)),
+            Tuple2(FinalInterval(LongArray(blockSize.size, {if (it == 0) blockSize[it].toLong() else 0L}), dims), longArrayOf(1, 0, 0))
+            )
     sc.use {
-        updateFeatureBlocks(it, n5io, listOf(Tuple2(FinalInterval(*dims), longArrayOf(0, 0, 0))), {Histogram(5,max=1.0001)})
+        updateFeatureBlocks(it, n5io, blocks, {Histogram(5,max=1.0001)})
     }
 
-    val dataBlock = N5FSReader(path).let{ it.readBlock("feature-blocks", it.getDatasetAttributes("feature-blocks"), longArrayOf(0, 0, 0)) as ByteArrayDataBlock}
+
     val featureMap = TLongObjectHashMap<TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>()
-    val buffer = ByteBuffer.wrap(dataBlock.data)
-    while (buffer.hasRemaining()) {
-        featureMap.computeIfAbsent(buffer.long) {TLongObjectHashMap()}.put(buffer.long, Histogram(5, max=1.0001).let {it.deserializeFrom(buffer); listOf(it)})
+    for (index in 0 .. 1) {
+        val dataBlock = N5FSReader(path).let { it.readBlock("feature-blocks", it.getDatasetAttributes("feature-blocks"), longArrayOf(index.toLong(), 0, 0)) as ByteArrayDataBlock }
+        val localFeatureMap = TLongObjectHashMap<TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>()
+        val buffer = ByteBuffer.wrap(dataBlock.data)
+        while (buffer.hasRemaining()) {
+            val k1 = buffer.long
+            val k2 = buffer.long
+            val h = Histogram(5, max = 1.0001).let { it.deserializeFrom(buffer); it}
+            localFeatureMap.computeIfAbsent(k1) { TLongObjectHashMap() }.put(k2, listOf(h))
+            featureMap.computeIfAbsent(k1) { TLongObjectHashMap() }.let { it.put(k2, listOf(it[k2]?.get(0)?.plusUnsafe(h) ?: h)) }
+        }
+        LOG.info("Block edge features: {}", localFeatureMap)
     }
+
     LOG.info("Edge features: {}", featureMap)
 
 }
