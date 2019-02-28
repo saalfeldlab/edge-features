@@ -5,7 +5,9 @@ import gnu.trove.set.TLongSet
 import gnu.trove.set.hash.TLongHashSet
 import net.imglib2.FinalInterval
 import net.imglib2.Interval
+import net.imglib2.algorithm.util.Grids
 import net.imglib2.img.array.ArrayImgs
+import net.imglib2.img.cell.CellGrid
 import net.imglib2.type.numeric.integer.UnsignedLongType
 import net.imglib2.type.numeric.real.FloatType
 import net.imglib2.util.Intervals
@@ -48,33 +50,43 @@ class FeatureAndName(val feature: () -> DoubleStatisticsFeature<*>, val name: St
 fun updateFeatureBlocks(
         sc: JavaSparkContext,
         n5io: () -> N5IO,
-        blocks: List<Tuple2<out Interval, LongArray>>,
-        vararg features: () -> DoubleStatisticsFeature<*>) {
+        superBlocks: List<Interval>,
+        dimensions: LongArray,
+        blockSize: IntArray,
+        vararg features: () -> DoubleStatisticsFeature<*>,
+        numEdgesPerBlock: Int = 1 shl 16) {
 
     val edges = TLongObjectHashMap<TLongSet>()
     val perBlockEdges = sc
-            .parallelize(blocks.map{ Tuple3(Intervals.minAsLongArray(it._1()), Intervals.maxAsLongArray(it._1()), it._2()) })
+            .parallelize(superBlocks.map{ Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) })
             .map {
-                val block = FinalInterval(it._1(), it._2())
-                val weights = Views.extendValue(N5Utils.open<FloatType>(n5io().weightsContainer, n5io().weightsDataset), FloatType(Float.NaN))
-                val labels = Views.extendValue(N5Utils.open<UnsignedLongType>(n5io().labelsContainer, n5io().labelsDataset), UnsignedLongType(Label.INVALID))
-                val writer = n5io().featureBlockContainer
-                var dataset = n5io().featureBlockDataset
-                val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features=*features)
-                val edgeMap = TLongObjectHashMap<LongArray>()
-                edgeFeatures.forEachEntry { a, b -> edgeMap.put(a, b.keySet().toArray()); true }
-                LOG.info("Edge features: {}", edgeFeatures)
-                // TLongObjectHashMap$KeyView does not have closing curly brace in string representation!!
-                LOG.info("Edge map: {}", edgeMap)
 
-                var requiredSize = 0
-                edgeFeatures.forEachEntry { e1, set ->  set.forEachEntry { e2, features -> requiredSize += 2 * java.lang.Long.BYTES + features.map(DoubleStatisticsFeature<*>::numBytes).sum(); true }; true }
-                val blockData = ByteArray(requiredSize)
-                val buffer = ByteBuffer.wrap(blockData)
-                edgeFeatures.forEachEntry { e1, set ->  set.forEachEntry { e2, features -> buffer.putLong(e1); buffer.putLong(e2); features.forEach { it.serializeInto(buffer) }; true }; true }
-                buffer.rewind()
-                val dataBlock = ByteArrayDataBlock(Intervals.dimensionsAsIntArray(block), it._3(), blockData)
-                n5io().featureBlockContainer.writeBlock(n5io().featureBlockDataset, n5io().featureBlockContainer.getDatasetAttributes(n5io().featureBlockDataset), dataBlock)
+                val grid = CellGrid(dimensions, blockSize)
+                val blockPos = LongArray(grid.numDimensions())
+                val edgeMap = TLongObjectHashMap<TLongHashSet>()
+                LOG.info("Super block ({} {}) for block size {}", it._1(), it._2(), blockSize)
+
+                Grids.collectAllContainedIntervals(it._1(), it._2(), blockSize).forEach {block ->
+                    LOG.info("Extracting features for block {} inside superblock ({} {})", block, it._1(), it._2())
+                    block.min(blockPos)
+                    grid.getCellPosition(blockPos, blockPos)
+                    val weights = Views.extendValue(N5Utils.open<FloatType>(n5io().weightsContainer, n5io().weightsDataset), FloatType(Float.NaN))
+                    val labels = Views.extendValue(N5Utils.open<UnsignedLongType>(n5io().labelsContainer, n5io().labelsDataset), UnsignedLongType(Label.INVALID))
+                    val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features = *features)
+                    edgeFeatures.forEachEntry { key, values -> edgeMap.computeIfAbsent(key) { TLongHashSet() }.addAll(values.keySet()); true }
+                    LOG.info("Edge features: {}", edgeFeatures)
+                    // TLongObjectHashMap$KeyView does not have closing curly brace in string representation!!
+                    LOG.info("Edge map: {}", edgeMap)
+
+                    var requiredSize = 0
+                    edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> requiredSize += 2 * java.lang.Long.BYTES + features.map(DoubleStatisticsFeature<*>::numBytes).sum(); true }; true }
+                    val blockData = ByteArray(requiredSize)
+                    val buffer = ByteBuffer.wrap(blockData)
+                    edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> buffer.putLong(e1); buffer.putLong(e2); features.forEach { it.serializeInto(buffer) }; true }; true }
+                    buffer.rewind()
+                    val dataBlock = ByteArrayDataBlock(Intervals.dimensionsAsIntArray(block), blockPos, blockData)
+                    n5io().featureBlockContainer.writeBlock(n5io().featureBlockDataset, n5io().featureBlockContainer.getDatasetAttributes(n5io().featureBlockDataset), dataBlock)
+                }
 
                 edgeMap
             }
@@ -93,7 +105,10 @@ fun updateFeatureBlocks(
     val edgesRaiCursor = Views.flatIterable(edgesRai).cursor()
     edges.forEachEntry { e1, value -> value.forEach { edgesRaiCursor.next().setInteger(e1); edgesRaiCursor.next().setInteger(it); true }; true }
 
-    N5Utils.save(edgesRai, edgesContainer, edgesDataset, intArrayOf(2, edgeCount), GzipCompression())
+    N5Utils.save(edgesRai, edgesContainer, edgesDataset, intArrayOf(2, numEdgesPerBlock), GzipCompression())
+
+}
+
 
 }
 
@@ -125,11 +140,11 @@ fun main(args: Array<String>) {
             edgesDataset = "edges"
     )}
     val blocks = listOf(
-            Tuple2(FinalInterval(*LongArray(blockSize.size, {blockSize[it].toLong()})), longArrayOf(0, 0, 0)),
-            Tuple2(FinalInterval(LongArray(blockSize.size, {if (it == 0) blockSize[it].toLong() else 0L}), dims), longArrayOf(1, 0, 0))
-            )
+            FinalInterval(*LongArray(blockSize.size, {blockSize[it].toLong()})),
+            FinalInterval(LongArray(blockSize.size, {if (it == 0) blockSize[it].toLong() else 0L}), dims.map {it - 1}.toLongArray()))
+
     sc.use {
-        updateFeatureBlocks(it, n5io, blocks, {Histogram(5,max=1.0001)})
+        updateFeatureBlocks(it, n5io, blocks, dims, blockSize, {Histogram(5,max=1.0001)})
     }
 
 
