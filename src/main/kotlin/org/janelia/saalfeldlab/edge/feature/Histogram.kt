@@ -1,10 +1,11 @@
 package org.janelia.saalfeldlab.edge.feature
 
-import gnu.trove.map.TLongObjectMap
 import net.imglib2.type.numeric.RealType
+import net.imglib2.type.numeric.real.DoubleType
 import net.imglib2.type.operators.ValueEquals
 import org.apache.commons.lang3.builder.ToStringBuilder
 import org.apache.commons.lang3.builder.ToStringStyle
+import java.nio.ByteBuffer
 import java.util.Arrays
 import kotlin.math.floor
 
@@ -24,10 +25,10 @@ class Histogram @JvmOverloads constructor(
     var underflow = 0L
 
     init {
-        assert(min.isFinite(), {"min must be final but got $min"})
-        assert(max.isFinite(), {"max must be final but got $max"})
-        assert(max > min, {"$max > $min"})
-        assert(nBins > 0, {"Need at least one bin in the histogram"})
+        require(min.isFinite(), {"min must be final but got $min"})
+        require(max.isFinite(), {"max must be final but got $max"})
+        require(max > min, {"$max > $min"})
+        require(nBins > 0, {"Need at least one bin in the histogram"})
 
         this.bins = LongArray(this.nBins) {0}
         this.range = this.max - this.min
@@ -35,7 +36,6 @@ class Histogram @JvmOverloads constructor(
         this.maxBinIndex = this.nBins - 1
 
         addValues(*initialValues)
-
     }
 
     fun copy(): Histogram {
@@ -130,11 +130,39 @@ class Histogram @JvmOverloads constructor(
         private fun normalizeCounts(count: Long, bins: LongArray) = DoubleArray(bins.size) {bins[it].toDouble() / count}
     }
 
-    fun toDoubleArray() = normalized().toDoubleArray()
+    override fun pack() = normalized()
 
-    override fun numDoubles(): Int = bins.size + 5 // 5: min, max, count, overflow, underflow, cf: toDoubleArray().size
+    // 5: min, max, count, overflow, underflow
+    override fun packedSizeInDoubles(): Int = nBins + 5
 
-    override fun <T : RealType<T>> serializeInto(target: Iterator<T>) = toDoubleArray().forEach { target.next().setReal(it) }
+    // nbins, bins, min, max, count, underflow, overflow
+    override fun serializeInto(target: ByteBuffer) {
+        target.putInt(this.nBins)
+        bins.forEach {target.putLong(it)}
+        target.putDouble(min)
+        target.putDouble(max)
+        target.putLong(count)
+        target.putLong(underflow)
+        target.putLong(overflow)
+    }
+
+    // nbins, bins, min, max, count, underflow, overflow
+    override fun deserializeFrom(source: ByteBuffer) {
+        val nBins = source.int
+        require(nBins == this.nBins) {"Inconsistent number of bins: $nBins != ${this.nBins}"}
+        bins.indices.forEach { bins[it] = source.getLong() }
+        val min = source.double
+        val max = source.double
+        require(min == this.min) {"Inconsistent min: $min != ${this.max}"}
+        require(max == this.max) {"Inconsistent max: $max != ${this.max}"}
+        count = source.getLong()
+        underflow = source.getLong()
+        overflow = source.getLong()
+    }
+
+
+    // pre-pend nbins
+    override fun numBytes(): Int = packedSizeInDoubles() * java.lang.Double.BYTES + java.lang.Integer.BYTES
 
 
 
@@ -146,11 +174,15 @@ class NormalizedHistogram(
         private val normalizedValues: DoubleArray,
         val count: Long,
         val overflow: Double,
-        val underflow: Double) {
+        val underflow: Double) : DoubleSerializable {
 
     operator fun get(index: Int): Double {
         return this.normalizedValues[index]
     }
 
     fun toDoubleArray(): DoubleArray = normalizedValues + doubleArrayOf(min, max, count.toDouble(), underflow, overflow)
+
+    override fun numDoubles(): Int = normalizedValues.size + 5 // 5: min, max, count, overflow, underflow, cf: toDoubleArray().size
+
+    override fun serializeInto(target: Iterator<DoubleType>) = toDoubleArray().forEach { target.next().setReal(it) }
 }

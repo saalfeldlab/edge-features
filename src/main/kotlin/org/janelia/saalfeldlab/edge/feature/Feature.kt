@@ -2,25 +2,67 @@ package org.janelia.saalfeldlab.edge.feature
 
 import gnu.trove.map.TLongObjectMap
 import gnu.trove.map.hash.TLongObjectHashMap
+import io.netty.buffer.ByteBuf
 import net.imglib2.Interval
 import net.imglib2.RandomAccessible
 import net.imglib2.type.numeric.IntegerType
 import net.imglib2.type.numeric.RealType
+import net.imglib2.type.numeric.real.DoubleType
 import net.imglib2.util.Intervals
 import net.imglib2.view.Views
 import org.janelia.saalfeldlab.labels.Label
-import org.scijava.plugin.SciJavaPlugin
+import org.janelia.saalfeldlab.util.computeIfAbsent
+import java.nio.ByteBuffer
 import java.util.function.BiPredicate
 import java.util.function.DoublePredicate
 
-interface Feature<F: Feature<F>> : SciJavaPlugin {
+interface SerializeInto<T> {
+    fun serializeInto(target: T)
+}
+
+interface DeserializeFrom<T> {
+    fun deserializeFrom(source:T )
+}
+
+interface DoubleSerializable: SerializeInto<Iterator<DoubleType>> {
+
+    fun numDoubles(): Int
+
+}
+
+interface DoubleDeserializable: DeserializeFrom<Iterator<DoubleType>> {
+
+    fun numDoubles(): Int
+
+}
+
+interface ByteBufferSerializable: SerializeInto<ByteBuffer> {
+
+    fun serializeToByteBuffer(allocate: (Int) -> ByteBuffer = ByteBuffer::allocate): ByteBuffer {
+        val buffer = allocate(numBytes())
+        serializeInto(buffer)
+        // https://stackoverflow.com/a/25219828/1725687
+        buffer.rewind()
+        return buffer
+    }
+
+    fun numBytes(): Int
+
+}
+
+interface ByteBufferDeserializable: DeserializeFrom<ByteBuffer> {
+
+    fun numBytes(): Int
+
+}
+
+interface Feature<F: Feature<F>> : ByteBufferSerializable, ByteBufferDeserializable {
 
 
     @Throws(IncompatibleFeaturesException::class) operator fun plus(other: F): F
     @Throws(IncompatibleFeaturesException::class) operator fun plusAssign(other:F)
-
-    fun numDoubles(): Int
-    fun <T: RealType<T>> serializeInto(target: Iterator<T>)
+    fun pack(): DoubleSerializable
+    fun packedSizeInDoubles(): Int
 
     companion object {
         fun <F: Feature<F>> combine(f1: F, f2: F): F {
@@ -89,15 +131,6 @@ interface DoubleStatisticsFeature<F: DoubleStatisticsFeature<F>> : Feature<F> {
             return edgeIndexToIndexToFeatureListMapping
 
         }
-
-
-        private inline fun <T> TLongObjectMap<T>.computeIfAbsent(key: Long, mappingFunction: (Long) -> T) = this[key] ?: putAndReturn(key, mappingFunction(key))
-
-        private fun <T> TLongObjectMap<T>.putAndReturn(key: Long, value: T): T {
-            this.put(key, value)
-            return value
-        }
-
     }
 
 }

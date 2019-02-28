@@ -29,11 +29,16 @@ class HistogramTest {
         Assert.assertEquals(1, histogram[2])
         Assert.assertEquals(3, histogram[3])
 
-        Assert.assertEquals(4 + 5, histogram.numDoubles())
-        val target = ArrayImgs.doubles(histogram.numDoubles().toLong(), 1L)
-        histogram.serializeInto(Views.flatIterable(Views.hyperSlice(target, 1, 0L)).cursor())
+        Assert.assertEquals(4 + 5, histogram.packedSizeInDoubles())
+        val target = ArrayImgs.doubles(histogram.packedSizeInDoubles().toLong(), 1L)
+        histogram.pack().serializeInto(Views.flatIterable(Views.hyperSlice(target, 1, 0L)).cursor())
         // bins, min, max, count, overflow, underflow
         Assert.assertArrayEquals(doubleArrayOf(2.0 / 6.0, 0.0, 1.0 / 6.0, 3.0 / 6.0, -0.8, 0.8, 6.0, 1.0 / 6.0, 2.0 / 6.0), target.update(null).currentStorageArray, 0.0)
+
+        val deserialized = Histogram(nBins = 4, min = -0.8, max = 0.8)
+        Assert.assertNotEquals(histogram, deserialized)
+        deserialized.deserializeFrom(histogram.serializeToByteBuffer())
+        Assert.assertEquals(histogram, deserialized)
 
         val copy = histogram.copy()
         Assert.assertEquals(histogram, copy)
@@ -108,7 +113,7 @@ class HistogramTest {
                 features = *arrayOf({Histogram(nBins = 10)}),
                 block = labels)
 
-        LOG.info("Got features {}", features)
+        LOG.debug("Got features {}", features)
         Assert.assertEquals(2, features.size())
         Assert.assertEquals(TLongHashSet(longArrayOf(1, 2)), features.keySet())
         Assert.assertEquals(TLongHashSet(longArrayOf(2, 3)), features[1].keySet())
