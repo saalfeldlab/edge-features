@@ -84,6 +84,7 @@
 		<releaseProfiles>deploy-to-imagej</releaseProfiles>
 
 		<imglib2-algorithm.version>0.11.1</imglib2-algorithm.version>
+		<spark.master>local</spark.master>
 	</properties>
 
 	<repositories>
@@ -281,5 +282,31 @@
 			</build>
 		</profile>
 	</profiles>
+
+	<!-- Use this to set spark master to local for tests
+	https://maven.apache.org/surefire/maven-surefire-plugin/examples/system-properties.html
+	https://stackoverflow.com/questions/33047695/how-to-set-java-scala-tests-system-properties-through-maven-plugin
+	-->
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<executions>
+					<execution>
+						<id>test</id>
+						<goals>
+							<goal>test</goal>
+						</goals>
+					</execution>
+				</executions>
+				<configuration>
+					<systemPropertyVariables>
+					<spark.master>${spark.master}</spark.master>
+					</systemPropertyVariables>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
 
 </project>
