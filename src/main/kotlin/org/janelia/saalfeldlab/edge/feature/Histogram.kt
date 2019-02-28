@@ -143,5 +143,5 @@ class NormalizedHistogram(
         return this.normalizedValues[index]
     }
 
-    fun toDoubleArray(): DoubleArray = normalizedValues + doubleArrayOf(min, max, count.toDouble(), overflow, underflow)
+    fun toDoubleArray(): DoubleArray = normalizedValues + doubleArrayOf(min, max, count.toDouble(), underflow, overflow)
 }
