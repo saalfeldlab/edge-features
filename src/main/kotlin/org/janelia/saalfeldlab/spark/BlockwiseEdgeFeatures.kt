@@ -14,6 +14,8 @@ import net.imglib2.type.numeric.integer.UnsignedLongType
 import net.imglib2.type.numeric.real.FloatType
 import net.imglib2.util.Intervals
 import net.imglib2.view.Views
+import org.apache.commons.lang3.builder.ToStringBuilder
+import org.apache.commons.lang3.builder.ToStringStyle
 import org.apache.spark.SparkConf
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.api.java.function.VoidFunction
@@ -49,6 +51,27 @@ class BlockwiseEdgeFeatures {
 
     companion object {
 
+        private class WriteBlock<T>(
+                val dataBlock: DataBlock<T>,
+                val container: N5Writer,
+                val dataset: String,
+                val datasetAttributes: DatasetAttributes? = null): Runnable {
+            override fun run() {
+                LOG.debug("Writing block {}", dataBlock)
+                container.writeBlock(dataset, datasetAttributes ?: container.getDatasetAttributes(dataset), dataBlock)
+            }
+
+            override fun toString(): String {
+                return ToStringBuilder(this, ToStringStyle.SHORT_PREFIX_STYLE)
+                        .append("dataBlock", dataBlock)
+                        .append("container", container)
+                        .append("dataset", dataset)
+                        .append("datasetAttributes", datasetAttributes)
+                        .toString()
+            }
+
+        }
+
         fun updateFeatureBlocks(
                 sc: JavaSparkContext,
                 n5io: () -> N5IO,
@@ -56,6 +79,7 @@ class BlockwiseEdgeFeatures {
                 dimensions: LongArray,
                 blockSize: IntArray,
                 vararg features: () -> DoubleStatisticsFeature<*>,
+                numWriterThreads: Int = 1,
                 numEdgesPerBlock: Int = 1 shl 16) {
 
             val edges = TLongObjectHashMap<TLongSet>()
@@ -63,22 +87,23 @@ class BlockwiseEdgeFeatures {
                     .parallelize(superBlocks.map { Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) })
                     .map {
 
+                        val ioExecutors = Executors.newFixedThreadPool(numWriterThreads) {val t = Thread(it); t.name = "io-executor-$it"; t.isDaemon = true; LOG.debug("Creating new thread {}", t); t}
                         val grid = CellGrid(dimensions, blockSize)
-                        val blockPos = LongArray(grid.numDimensions())
                         val edgeMap = TLongObjectHashMap<TLongHashSet>()
-                        LOG.info("Super block ({} {}) for block size {}", it._1(), it._2(), blockSize)
+                        val weights = Views.extendValue(N5Utils.open<FloatType>(n5io().weightsContainer, n5io().weightsDataset), FloatType(Float.NaN))
+                        val labels = Views.extendValue(N5Utils.open<UnsignedLongType>(n5io().labelsContainer, n5io().labelsDataset), UnsignedLongType(Label.INVALID))
+                        LOG.debug("Super block ({} {}) for block size {}", it._1(), it._2(), blockSize)
 
                         Grids.collectAllContainedIntervals(it._1(), it._2(), blockSize).forEach { block ->
-                            LOG.info("Extracting features for block {} inside superblock ({} {})", block, it._1(), it._2())
+                            val blockPos = LongArray(grid.numDimensions())
+                            LOG.debug("Extracting features for block {} inside superblock ({} {})", block, it._1(), it._2())
                             block.min(blockPos)
                             grid.getCellPosition(blockPos, blockPos)
-                            val weights = Views.extendValue(N5Utils.open<FloatType>(n5io().weightsContainer, n5io().weightsDataset), FloatType(Float.NaN))
-                            val labels = Views.extendValue(N5Utils.open<UnsignedLongType>(n5io().labelsContainer, n5io().labelsDataset), UnsignedLongType(Label.INVALID))
                             val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features = *features)
                             edgeFeatures.forEachEntry { key, values -> edgeMap.computeIfAbsent(key) { TLongHashSet() }.addAll(values.keySet()); true }
-                            LOG.info("Edge features: {}", edgeFeatures)
+                            LOG.debug("Edge features: {}", edgeFeatures)
                             // TLongObjectHashMap$KeyView does not have closing curly brace in string representation!!
-                            LOG.info("Edge map: {}", edgeMap)
+                            LOG.debug("Edge map: {}", edgeMap)
 
                             var requiredSize = 0
                             edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> requiredSize += 2 * java.lang.Long.BYTES + features.map(DoubleStatisticsFeature<*>::numBytes).sum(); true }; true }
@@ -87,9 +112,13 @@ class BlockwiseEdgeFeatures {
                             edgeFeatures.forEachEntry { e1, set -> set.forEachEntry { e2, features -> buffer.putLong(e1); buffer.putLong(e2); features.forEach { it.serializeInto(buffer) }; true }; true }
                             buffer.rewind()
                             val dataBlock = ByteArrayDataBlock(Intervals.dimensionsAsIntArray(block), blockPos, blockData)
-                            n5io().featureBlockContainer.writeBlock(n5io().featureBlockDataset, n5io().featureBlockContainer.getDatasetAttributes(n5io().featureBlockDataset), dataBlock)
+                            val task = n5io().let { n5 -> WriteBlock(dataBlock, n5.featureBlockContainer, n5.featureBlockDataset) }
+                            LOG.debug("Submitting task {}", task)
+                            ioExecutors.submit(task)
                         }
 
+                        ioExecutors.shutdown()
+                        LOG.debug("Finished processing super block {}", it)
                         edgeMap
                     }
                     .collect()
