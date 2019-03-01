@@ -7,6 +7,7 @@ import gnu.trove.set.hash.TLongHashSet
 import net.imglib2.FinalInterval
 import net.imglib2.Interval
 import net.imglib2.RandomAccess
+import net.imglib2.RandomAccessible
 import net.imglib2.algorithm.util.Grids
 import net.imglib2.img.array.ArrayImgs
 import net.imglib2.img.cell.CellGrid
@@ -229,9 +230,13 @@ fun main() {
 
 }
 
-private fun <T> RandomAccess<T>.get(vararg pos: Long): T {
+operator fun <T> RandomAccess<T>.get(vararg pos: Long): T {
     this.setPosition(pos)
     return get()
+}
+
+operator fun <T> RandomAccessible<T>.get(vararg pos: Long): T {
+    return randomAccess().get(*pos)
 }
 
 class ExtractEdges(
@@ -311,9 +316,9 @@ class MergeEdgeFeatures(
 
                 for (index in edgeFeaturesList.indices) {
 
-                    val e1 = relevantEdges.randomAccess().get(0L, index.toLong()).integerLong
+                    val e1 = relevantEdges[0L, index.toLong()].integerLong
                     featureMap[e1]?.let { m1 ->
-                        val e2 = relevantEdges.randomAccess().get(1L, index.toLong()).integerLong
+                        val e2 = relevantEdges[1L, index.toLong()].integerLong
                         m1[e2]?.let { features ->
                             val featuresFor = edgeFeaturesList[index]
                             for (featureIndex in featuresFor.indices) {
