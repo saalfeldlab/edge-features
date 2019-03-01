@@ -260,12 +260,16 @@ class BlockwiseEdgeFeatures {
 }
 
 fun main() {
-
     val readPath = "/nrs/saalfeld/hanslovskyp/experiments/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/predictions/lauritzen/02/workspace.n5"
     val weightsDataset = "volumes/predictions/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/0/142000/affinities-averaged"
+    val labelsDataset = "volumes/predictions/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/0/142000/watersheds/merge_threshold=0.75_seed_threshold=0.5/merged"
+    val path = "${System.getProperty("user.home")}/.local/tmp/edge-features.n5"
+//    val readPath = "${System.getProperty("user.home")}/.local/tmp/slice.n5"
+//    val weightsDataset = "weights"
+//    val labelsDataset = "labels"
+//    val path = "${System.getProperty("user.home")}/.local/tmp/edge-features-smaller-block.n5"
     val attributes = N5FSReader(readPath).getDatasetAttributes(weightsDataset)
     val dims = attributes.dimensions
-    val path = "${System.getProperty("user.home")}/.local/tmp/edge-features-with-io-executors-reduce-by-key.n5"
 
     N5FSWriter(path).createDataset("feature-blocks", dims, attributes.blockSize, DataType.INT8, GzipCompression())
 
@@ -277,7 +281,7 @@ fun main() {
             weightsContainer = N5FSReader(readPath),
             labelsContainer = N5FSReader(readPath),
             weightsDataset = weightsDataset,
-            labelsDataset = "volumes/predictions/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/0/142000/watersheds/merge_threshold=0.75_seed_threshold=0.5/merged",
+            labelsDataset = labelsDataset,
             featureBlockContainer = N5FSWriter(path),
             featureBlockDataset = "feature-blocks",
             edgesDataset = "edges",
@@ -409,7 +413,7 @@ class WriteEdgeFeatures(
     private val numFeaturesDoubles = features.map { it().packedSizeInDoubles() }.sum()
 
     override fun call(blockMinAndData: Tuple2<Long, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>) {
-        LOG.debug("Writing features {} for block position {}", blockMinAndData)
+        LOG.debug("Writing {} features for block position {}", blockMinAndData._2().size(), blockMinAndData._1())
         val blockMin = blockMinAndData._1()
         val blockMax = min(blockMin + numEdgesPerBlock, numEdges) - 1
         val featureMap = blockMinAndData._2()
