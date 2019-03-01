@@ -181,7 +181,7 @@ class BlockwiseEdgeFeatures {
             }
         }
 
-        fun mergeFeaturesWithTreeAggregate(
+        fun mergeFeaturesWithReduceByKey(
                 sc: JavaSparkContext,
                 n5io: () -> N5IO,
                 vararg features: () -> DoubleStatisticsFeature<*>,
@@ -235,7 +235,7 @@ class BlockwiseEdgeFeatures {
         }
 
 
-        @Deprecated(message = "This seems to be slow", replaceWith = ReplaceWith("mergeFeaturesWithTreeAggregate(sc, n5io, features, numEdgesPerBlock)"))
+        @Deprecated(message = "This seems to be slow", replaceWith = ReplaceWith("mergeFeaturesWithReduceByKey(sc, n5io, features, numEdgesPerBlock)"))
         fun mergeFeatures(
                 sc: JavaSparkContext,
                 n5io: () -> N5IO,
@@ -265,7 +265,7 @@ fun main() {
     val weightsDataset = "volumes/predictions/quasi-isotropic-predictions/affinities-glia/neuron_ids_noglia/0/142000/affinities-averaged"
     val attributes = N5FSReader(readPath).getDatasetAttributes(weightsDataset)
     val dims = attributes.dimensions
-    val path = "${System.getProperty("user.home")}/.local/tmp/edge-features-with-io-executors.n5"
+    val path = "${System.getProperty("user.home")}/.local/tmp/edge-features-with-io-executors-reduce-by-key.n5"
 
     N5FSWriter(path).createDataset("feature-blocks", dims, attributes.blockSize, DataType.INT8, GzipCompression())
 
@@ -287,7 +287,8 @@ fun main() {
 
     sc.use {
         BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, blocks, dims, attributes.blockSize, *features)
-        BlockwiseEdgeFeatures.mergeFeatures(it, n5io, *features)
+        BlockwiseEdgeFeatures.findEdges(it, n5io, features.map { it().numBytes() }.sum(), 3, 3, 3, numEdgesPerBlock = 1 shl 16)
+        BlockwiseEdgeFeatures.mergeFeaturesWithReduceByKey(it, n5io, *features, blocksPerSuperBlock = intArrayOf(3, 3, 3), numEdgesPerBlock = 1 shl 16)
     }
 
 }

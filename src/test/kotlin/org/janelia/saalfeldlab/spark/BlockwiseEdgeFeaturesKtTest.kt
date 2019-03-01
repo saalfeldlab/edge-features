@@ -68,7 +68,7 @@ class BlockwiseEdgeFeaturesKtTest {
         sc.use {
             BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, superBlocks, dims, blockSize, *featureRequests)
             BlockwiseEdgeFeatures.findEdges(it, n5io, numFeatureBytes, numEdgesPerBlock = 1)
-            BlockwiseEdgeFeatures.mergeFeaturesWithTreeAggregate(it, n5io, *featureRequests, numEdgesPerBlock = 1)
+            BlockwiseEdgeFeatures.mergeFeaturesWithReduceByKey(it, n5io, *featureRequests, numEdgesPerBlock = 1)
         }
 
         n5io().let {n5 ->
