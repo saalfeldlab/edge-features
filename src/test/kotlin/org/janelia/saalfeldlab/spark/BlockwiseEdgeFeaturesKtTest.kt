@@ -69,7 +69,6 @@ class BlockwiseEdgeFeaturesKtTest {
             BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, superBlocks, dims, blockSize, *featureRequests)
             BlockwiseEdgeFeatures.findEdges(it, n5io, numFeatureBytes, numEdgesPerBlock = 1)
             BlockwiseEdgeFeatures.mergeFeaturesWithTreeAggregate(it, n5io, *featureRequests, numEdgesPerBlock = 1)
-//            BlockwiseEdgeFeatures.mergeFeatures(it, n5io, *featureRequests, numEdgesPerBlock = 1)
         }
 
         n5io().let {n5 ->
@@ -104,10 +103,9 @@ class BlockwiseEdgeFeaturesKtTest {
                             for (expectedFeature in groundTruthFeatures[edge.first][edge.second])
                                 expectedFeature.pack().serializeInto(it)
                         }
-                        Views.flatIterable(expected).cursor().let {
-                            while (it.hasNext())
-                                Assert.assertEquals(it.next(), actual.next())
-                        }
+                        LOG.debug("Expected features {} for edge ({} {})", groundTruthFeatures[edge.first][edge.second], edge.first, edge.second
+                        )
+                        Views.flatIterable(expected).cursor().let { c -> while (c.hasNext()) Assert.assertEquals(c.next(), actual.next()) }
                     }
                 }
 

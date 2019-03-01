@@ -117,7 +117,7 @@ class BlockwiseEdgeFeatures {
                             grid.getCellPosition(blockPos, blockPos)
                             val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features = *features)
                             edgeFeatures.forEachEntry { key, values -> edgeMap.computeIfAbsent(key) { TLongHashSet() }.addAll(values.keySet()); true }
-                            LOG.info("Edge features {} in block {}", edgeFeatures, block)
+                            LOG.debug("Edge features {} in block {}", edgeFeatures, block)
                             // TLongObjectHashMap$KeyView does not have closing curly brace in string representation!!
                             LOG.debug("Edge map: {}", edgeMap)
 
@@ -227,7 +227,7 @@ class BlockwiseEdgeFeatures {
                                     (v1 zip v).forEach { it.first.plusUnsafeAssign(it.second) }
                                 true
                             }
-                            LOG.info("Returning stats map {}", statsMap)
+                            LOG.debug("Returning stats map {}", statsMap)
                             statsMap
                         }
                         .foreach(WriteEdgeFeatures(n5io, numEdgesPerBlock, numEdges, *features))
@@ -408,20 +408,21 @@ class WriteEdgeFeatures(
     private val numFeaturesDoubles = features.map { it().packedSizeInDoubles() }.sum()
 
     override fun call(blockMinAndData: Tuple2<Long, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>) {
+        LOG.debug("Writing features {} for block position {}", blockMinAndData)
         val blockMin = blockMinAndData._1()
         val blockMax = min(blockMin + numEdgesPerBlock, numEdges) - 1
         val featureMap = blockMinAndData._2()
         val featureRai = ArrayImgs.doubles(numFeaturesDoubles.toLong(), blockMax - blockMin + 1)
-        LOG.info("Created store {} for edge features of size {} {}", featureRai, numFeaturesDoubles, blockMax - blockMin + 1)
+        LOG.debug("Created store {} for edge features of size {} {}", featureRai, numFeaturesDoubles, blockMax - blockMin + 1)
         require(featureMap.size().toLong() == blockMax - blockMin + 1) {"Expected ${blockMax - blockMin + 1} features but got ${featureMap.size()}"}
         val validRange = 0..featureRai.max(1)
         featureMap.forEachEntry { key, localFeatures ->
             require(key in validRange) {"Edge index $key not in valid range $validRange"};
             val target = Views.flatIterable(Views.hyperSlice(featureRai, 1, key)).cursor()
             localFeatures.forEach { it.pack().serializeInto(target) }
-            LOG.info("Serialized {} to doubles", localFeatures)
+            LOG.debug("Serialized {} to doubles", localFeatures)
             true }
-        n5io().let { N5Utils.saveBlock(featureRai, it.mergedFeaturesContainer, it.mergedFeaturesDataset, longArrayOf(blockMin / numEdgesPerBlock, 0)) }
+        n5io().let { N5Utils.saveBlock(featureRai, it.mergedFeaturesContainer, it.mergedFeaturesDataset, longArrayOf(0, blockMin / numEdgesPerBlock)) }
     }
 }
 
@@ -482,8 +483,8 @@ class MergeEdgeFeatures(
             for (index in edgeFeaturesList.indices) {
                 val featuresFor = edgeFeaturesList[index]
                 val target = Views.flatIterable(Views.hyperSlice(edgeFeatures, 1, index.toLong())).cursor()
-                LOG.info("Packing features {}", featuresFor)
-                featuresFor.forEach { f -> LOG.info("Packing feature {}", f); f.pack().serializeInto(target) }
+                LOG.debug("Packing features {}", featuresFor)
+                featuresFor.forEach { f -> LOG.debug("Packing feature {}", f); f.pack().serializeInto(target) }
             }
 
             val targetAttributes = DatasetAttributes(longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock), DataType.FLOAT64, GzipCompression())
