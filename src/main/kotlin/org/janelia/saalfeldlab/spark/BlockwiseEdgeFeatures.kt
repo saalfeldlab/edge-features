@@ -7,9 +7,8 @@ import gnu.trove.set.TLongSet
 import gnu.trove.set.hash.TLongHashSet
 import net.imglib2.FinalInterval
 import net.imglib2.Interval
-import net.imglib2.RandomAccess
-import net.imglib2.RandomAccessible
 import net.imglib2.algorithm.util.Grids
+import net.imglib2.get
 import net.imglib2.img.array.ArrayImgs
 import net.imglib2.img.cell.CellGrid
 import net.imglib2.type.numeric.integer.UnsignedLongType
@@ -273,7 +272,7 @@ fun main() {
 
     N5FSWriter(path).createDataset("feature-blocks", dims, attributes.blockSize, DataType.INT8, GzipCompression())
 
-    val features = arrayOf({Histogram(5,max=1.0001)})
+    val features = arrayOf({Histogram(100,max=1.0001)})
 
     val conf = SparkConf().setAppName(MethodHandles.lookup().lookupClass().simpleName)
     val sc = JavaSparkContext(conf)
@@ -288,22 +287,14 @@ fun main() {
             mergedFeaturesDataset = "edge-features"
     )}
     val blocks = Grids.collectAllContainedIntervals(attributes.dimensions, attributes.blockSize.map { 3 * it }.toIntArray())
+    val numEdgesPerBlock = 1 shl 12
 
     sc.use {
         BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, blocks, dims, attributes.blockSize, *features)
-        BlockwiseEdgeFeatures.findEdges(it, n5io, features.map { it().numBytes() }.sum(), 3, 3, 3, numEdgesPerBlock = 1 shl 16)
-        BlockwiseEdgeFeatures.mergeFeaturesWithReduceByKey(it, n5io, *features, blocksPerSuperBlock = intArrayOf(3, 3, 3), numEdgesPerBlock = 1 shl 16)
+        BlockwiseEdgeFeatures.findEdges(it, n5io, features.map { it().numBytes() }.sum(), 3, 3, 3, numEdgesPerBlock = numEdgesPerBlock)
+        BlockwiseEdgeFeatures.mergeFeaturesWithReduceByKey(it, n5io, *features, blocksPerSuperBlock = intArrayOf(3, 3, 3), numEdgesPerBlock = numEdgesPerBlock)
     }
 
-}
-
-operator fun <T> RandomAccess<T>.get(vararg pos: Long): T {
-    this.setPosition(pos)
-    return get()
-}
-
-operator fun <T> RandomAccessible<T>.get(vararg pos: Long): T {
-    return randomAccess().get(*pos)
 }
 
 class ExtractEdges(
