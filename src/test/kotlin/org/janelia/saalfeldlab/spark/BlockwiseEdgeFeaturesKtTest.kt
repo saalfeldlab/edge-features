@@ -1,6 +1,5 @@
 package org.janelia.saalfeldlab.spark
 
-import gnu.trove.map.TLongObjectMap
 import gnu.trove.map.hash.TLongObjectHashMap
 import gnu.trove.set.TLongSet
 import gnu.trove.set.hash.TLongHashSet
@@ -16,7 +15,6 @@ import net.imglib2.view.Views
 import org.apache.spark.SparkConf
 import org.apache.spark.api.java.JavaSparkContext
 import org.janelia.saalfeldlab.edge.feature.DoubleStatisticsFeature
-import org.janelia.saalfeldlab.edge.feature.Feature
 import org.janelia.saalfeldlab.edge.feature.Histogram
 import org.janelia.saalfeldlab.n5.DataType
 import org.janelia.saalfeldlab.n5.GzipCompression
@@ -65,9 +63,11 @@ class BlockwiseEdgeFeaturesKtTest {
 
         val featureRequests = arrayOf({ Histogram(nBins = 10) })
         val numDoubleEntries = featureRequests.map { it().packedSizeInDoubles() }.sum()
+        val numFeatureBytes = featureRequests.map { it().numBytes() }.sum()
 
         sc.use {
-            BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, superBlocks, dims, blockSize, *featureRequests, numEdgesPerBlock = 1)
+            BlockwiseEdgeFeatures.updateFeatureBlocks(it, n5io, superBlocks, dims, blockSize, *featureRequests)
+            BlockwiseEdgeFeatures.findEdges(it, n5io, numFeatureBytes, numEdgesPerBlock = 1)
             BlockwiseEdgeFeatures.mergeFeatures(it, n5io, *featureRequests, numEdgesPerBlock = 1)
         }
 

@@ -18,6 +18,7 @@ import org.apache.commons.lang3.builder.ToStringBuilder
 import org.apache.commons.lang3.builder.ToStringStyle
 import org.apache.spark.SparkConf
 import org.apache.spark.api.java.JavaSparkContext
+import org.apache.spark.api.java.function.Function
 import org.apache.spark.api.java.function.VoidFunction
 import org.janelia.saalfeldlab.edge.feature.DoubleStatisticsFeature
 import org.janelia.saalfeldlab.edge.feature.Histogram
@@ -29,9 +30,17 @@ import org.slf4j.LoggerFactory
 import scala.Tuple2
 import java.lang.invoke.MethodHandles
 import java.nio.ByteBuffer
+import java.util.*
 import java.util.concurrent.Executors
 
 private val LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())
+
+private typealias MinMaxInterval = Tuple2<LongArray, LongArray>
+
+private fun MinMaxInterval.min() = _1()
+private fun MinMaxInterval.max() = _2()
+private fun MinMaxInterval.interval() = FinalInterval(min(), max())
+private fun MinMaxInterval.size() = Intervals.dimensionsAsLongArray(interval())
 
 class N5IO(
         val featureBlockContainer: N5Writer,
@@ -79,12 +88,11 @@ class BlockwiseEdgeFeatures {
                 dimensions: LongArray,
                 blockSize: IntArray,
                 vararg features: () -> DoubleStatisticsFeature<*>,
-                numWriterThreads: Int = 1,
-                numEdgesPerBlock: Int = 1 shl 16) {
+                numWriterThreads: Int = 1) {
 
             val edges = TLongObjectHashMap<TLongSet>()
             val perBlockEdges = sc
-                    .parallelize(superBlocks.map { Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) })
+                    .parallelize(superBlocks.map { MinMaxInterval(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) })
                     .map {
 
                         val ioExecutors = Executors.newFixedThreadPool(numWriterThreads) {val t = Thread(it); t.name = "io-executor-$it"; t.isDaemon = true; LOG.debug("Creating new thread {}", t); t}
@@ -92,11 +100,11 @@ class BlockwiseEdgeFeatures {
                         val edgeMap = TLongObjectHashMap<TLongHashSet>()
                         val weights = Views.extendValue(N5Utils.open<FloatType>(n5io().weightsContainer, n5io().weightsDataset), FloatType(Float.NaN))
                         val labels = Views.extendValue(N5Utils.open<UnsignedLongType>(n5io().labelsContainer, n5io().labelsDataset), UnsignedLongType(Label.INVALID))
-                        LOG.debug("Super block ({} {}) for block size {}", it._1(), it._2(), blockSize)
+                        LOG.debug("Super block ({} {}) for block size {}", it.min(), it.max(), blockSize)
 
                         Grids.collectAllContainedIntervals(it._1(), it._2(), blockSize).forEach { block ->
                             val blockPos = LongArray(grid.numDimensions())
-                            LOG.debug("Extracting features for block {} inside superblock ({} {})", block, it._1(), it._2())
+                            LOG.debug("Extracting features for block {} inside superblock ({} {})", block, it.min(), it.max())
                             block.min(blockPos)
                             grid.getCellPosition(blockPos, blockPos)
                             val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features = *features)
@@ -121,22 +129,48 @@ class BlockwiseEdgeFeatures {
                         LOG.debug("Finished processing super block {}", it)
                         edgeMap
                     }
-                    .collect()
-            perBlockEdges.forEach { it.forEachEntry { a, b -> edges.computeIfAbsent(a, { TLongHashSet() }).addAll(b); true } }
-            val edgesContainer = n5io().edgesContainer
-            val edgesDataset = n5io().edgesDataset
-            if (edgesContainer.datasetExists(edgesDataset)) {
-                val cursor = Views.flatIterable(N5Utils.open<UnsignedLongType>(edgesContainer, edgesDataset)).cursor()
-                while (cursor.hasNext())
-                    edges.computeIfAbsent(cursor.next().integerLong, { TLongHashSet() }).add(cursor.next().integerLong)
+                    .count()
+        }
+
+        fun findEdges(
+                sc: JavaSparkContext,
+                n5io: () -> N5IO,
+                numFeatureBytes: Int,
+                vararg blocksPerSuperBlock: Int,
+                numEdgesPerBlock: Int = 1 shl 16) {
+            n5io().let { n5 ->
+                val featureBlockAttributes = n5.featureBlockContainer.getDatasetAttributes(n5.featureBlockDataset)
+                val actualBlocksPerSuperBlock = if (blocksPerSuperBlock.isEmpty()) IntArray(featureBlockAttributes.numDimensions, {1}) else blocksPerSuperBlock
+                require(actualBlocksPerSuperBlock.size == featureBlockAttributes.numDimensions)
+                {"Super block size has wrong number of dimensions. Required: ${featureBlockAttributes.numDimensions} Found: ${Arrays.toString(blocksPerSuperBlock)}"}
+
+                val superBlockSize = (actualBlocksPerSuperBlock zip featureBlockAttributes.blockSize).map { it.first * it.second }.toIntArray()
+
+                val superBlocks = Grids
+                        .collectAllContainedIntervals(featureBlockAttributes.dimensions, superBlockSize)
+                        .map {MinMaxInterval(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it))}
+
+                val edges = TLongObjectHashMap<TLongSet>()
+                val perBlockEdges = sc
+                        .parallelize(superBlocks)
+                        .map(ExtractEdges(n5io = n5io, numFeatureBytes = numFeatureBytes))
+                        .collect()
+                perBlockEdges.forEach { it.forEachEntry { a, b -> edges.computeIfAbsent(a, { TLongHashSet() }).addAll(b); true } }
+                val edgesContainer = n5io().edgesContainer
+                val edgesDataset = n5io().edgesDataset
+                if (edgesContainer.datasetExists(edgesDataset)) {
+                    val cursor = Views.flatIterable(N5Utils.open<UnsignedLongType>(edgesContainer, edgesDataset)).cursor()
+                    while (cursor.hasNext())
+                        edges.computeIfAbsent(cursor.next().integerLong, { TLongHashSet() }).add(cursor.next().integerLong)
+                }
+
+                val edgeCount = edges.valueCollection().map { it.size() }.reduce { i1, i2 -> i1 + i2 }
+                val edgesRai = ArrayImgs.unsignedLongs(2L, edgeCount.toLong())
+                val edgesRaiCursor = Views.flatIterable(edgesRai).cursor()
+                edges.forEachEntry { e1, value -> value.forEach { edgesRaiCursor.next().setInteger(e1); edgesRaiCursor.next().setInteger(it); true }; true }
+
+                N5Utils.save(edgesRai, edgesContainer, edgesDataset, intArrayOf(2, numEdgesPerBlock), GzipCompression())
             }
-
-            val edgeCount = edges.valueCollection().map { it.size() }.reduce { i1, i2 -> i1 + i2 }
-            val edgesRai = ArrayImgs.unsignedLongs(2L, edgeCount.toLong())
-            val edgesRaiCursor = Views.flatIterable(edgesRai).cursor()
-            edges.forEachEntry { e1, value -> value.forEach { edgesRaiCursor.next().setInteger(e1); edgesRaiCursor.next().setInteger(it); true }; true }
-
-            N5Utils.save(edgesRai, edgesContainer, edgesDataset, intArrayOf(2, numEdgesPerBlock), GzipCompression())
         }
 
         fun mergeFeatures(
@@ -152,7 +186,7 @@ class BlockwiseEdgeFeatures {
                 it.mergedFeaturesContainer.createDataset(it.mergedFeaturesDataset, longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock), DataType.FLOAT64, GzipCompression())
                 val edgeFeatureBlocks = Grids
                         .collectAllContainedIntervals(longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock))
-                        .map { Tuple2(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) }
+                        .map { MinMaxInterval(Intervals.minAsLongArray(it), Intervals.maxAsLongArray(it)) }
                 sc
                         .parallelize(edgeFeatureBlocks)
                         .foreach(MergeEdgeFeatures(n5io, numEdgesPerBlock, *features))
@@ -200,10 +234,47 @@ private fun <T> RandomAccess<T>.get(vararg pos: Long): T {
     return get()
 }
 
+class ExtractEdges(
+        val n5io: () -> N5IO,
+        val numFeatureBytes: Int
+): Function<MinMaxInterval, TLongObjectHashMap<TLongHashSet>> {
+
+    val dimensions: LongArray
+    val blockSize: IntArray
+
+    init {
+        n5io().let {
+            val attrs = it.featureBlockContainer.getDatasetAttributes(it.featureBlockDataset)
+            dimensions = attrs.dimensions
+            blockSize = attrs.blockSize
+        }
+    }
+
+    override fun call(superBlock: MinMaxInterval): TLongObjectHashMap<TLongHashSet> {
+        return n5io().let {
+            val edgesInBlock = TLongObjectHashMap<TLongHashSet>()
+            val grid = CellGrid(dimensions, blockSize)
+            val blockPos = superBlock.min().clone()
+            val attributes = it.featureBlockContainer.getDatasetAttributes(it.featureBlockDataset)
+            Grids.forEachOffset(superBlock.min(), superBlock.max(), blockSize) { block ->
+                grid.getCellPosition(block, blockPos)
+                val dataBlock = it.featureBlockContainer.readBlock(it.featureBlockDataset, attributes, blockPos) as ByteArrayDataBlock
+                val buffer = ByteBuffer.wrap(dataBlock.data)
+                while (buffer.hasRemaining()) {
+                    edgesInBlock.computeIfAbsent(buffer.long) {TLongHashSet()}.add(buffer.long)
+                    buffer.position(buffer.position() + numFeatureBytes)
+                }
+            }
+            edgesInBlock
+        }
+    }
+
+}
+
 class MergeEdgeFeatures(
         val n5io: () -> N5IO,
         val numEdgesPerBlock: Int,
-        vararg val features: () -> DoubleStatisticsFeature<*>) : VoidFunction<Tuple2<LongArray, LongArray>> {
+        vararg val features: () -> DoubleStatisticsFeature<*>) : VoidFunction<MinMaxInterval> {
 
     val numDoubles: Int
     val numEdges: Long
@@ -217,10 +288,10 @@ class MergeEdgeFeatures(
     }
 
 
-    override fun call(edgeFeatureBlock: Tuple2<LongArray, LongArray>) {
+    override fun call(edgeFeatureBlock: MinMaxInterval) {
         n5io().let {
-            val relevantEdges    = Views.zeroMin(Views.interval(N5Utils.open<UnsignedLongType>(it.edgesContainer, it.edgesDataset), FinalInterval(longArrayOf(0, edgeFeatureBlock._1()[1]), longArrayOf(1, edgeFeatureBlock._2()[1]))))
-            val edgeFeatures     = ArrayImgs.doubles(*Intervals.dimensionsAsLongArray(FinalInterval(edgeFeatureBlock._1(), edgeFeatureBlock._2())))
+            val relevantEdges    = Views.zeroMin(Views.interval(N5Utils.open<UnsignedLongType>(it.edgesContainer, it.edgesDataset), FinalInterval(longArrayOf(0, edgeFeatureBlock.min()[1]), longArrayOf(1, edgeFeatureBlock.max()[1]))))
+            val edgeFeatures     = ArrayImgs.doubles(*Intervals.dimensionsAsLongArray(FinalInterval(edgeFeatureBlock.min(), edgeFeatureBlock.max())))
             val edgeFeaturesList = List(edgeFeatures.dimension(1).toInt()) {features.map { it() }}
             val featureBlockDatasetAttributes = it.featureBlockContainer.getDatasetAttributes(it.featureBlockDataset)
             val featureBlockGrid = CellGrid(featureBlockDatasetAttributes.dimensions, featureBlockDatasetAttributes.blockSize)
@@ -263,7 +334,7 @@ class MergeEdgeFeatures(
 
             val targetAttributes = DatasetAttributes(longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock), DataType.FLOAT64, GzipCompression())
             val targetGrid = CellGrid(targetAttributes.dimensions, targetAttributes.blockSize)
-            val blockPos = edgeFeatureBlock._1().clone()
+            val blockPos = edgeFeatureBlock.min().clone()
             targetGrid.getCellPosition(blockPos, blockPos)
             N5Utils.saveBlock(edgeFeatures, it.mergedFeaturesContainer, it.mergedFeaturesDataset, targetAttributes, blockPos)
 
