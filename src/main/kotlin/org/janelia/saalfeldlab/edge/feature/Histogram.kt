@@ -4,8 +4,9 @@ import net.imglib2.type.numeric.real.DoubleType
 import net.imglib2.type.operators.ValueEquals
 import org.apache.commons.lang3.builder.ToStringBuilder
 import org.apache.commons.lang3.builder.ToStringStyle
+import java.io.Serializable
 import java.nio.ByteBuffer
-import java.util.Arrays
+import java.util.*
 import kotlin.math.floor
 
 // TODO use experimental kotlin unsigned data types? Currently, no division defined between double and unsigned types
@@ -13,7 +14,7 @@ class Histogram @JvmOverloads constructor(
         val nBins: Int,
         val min: Double = 0.0,
         val max: Double = 1.0,
-        vararg initialValues: Double) : DoubleStatisticsFeature<Histogram>, ValueEquals<Histogram> {
+        vararg initialValues: Double) : DoubleStatisticsFeature<Histogram>, ValueEquals<Histogram>, Serializable {
 
     private val bins: LongArray
     val range: Double
@@ -37,7 +38,7 @@ class Histogram @JvmOverloads constructor(
         addValues(*initialValues)
     }
 
-    fun copy(): Histogram {
+    override fun copy(): Histogram {
         val that = Histogram(nBins = this.nBins, min = this.min, max = this.max)
         that.count = this.count
         that.underflow = this.underflow

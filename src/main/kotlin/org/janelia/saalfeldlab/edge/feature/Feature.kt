@@ -2,7 +2,6 @@ package org.janelia.saalfeldlab.edge.feature
 
 import gnu.trove.map.TLongObjectMap
 import gnu.trove.map.hash.TLongObjectHashMap
-import io.netty.buffer.ByteBuf
 import net.imglib2.Interval
 import net.imglib2.RandomAccessible
 import net.imglib2.type.numeric.IntegerType
@@ -66,6 +65,7 @@ interface Feature<F: Feature<F>> : ByteBufferSerializable, ByteBufferDeserializa
 
     fun pack(): DoubleSerializable
     fun packedSizeInDoubles(): Int
+    fun copy(): F
 
     companion object {
         fun <F: Feature<F>> combine(f1: F, f2: F): F {

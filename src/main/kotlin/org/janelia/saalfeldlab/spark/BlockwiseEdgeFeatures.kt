@@ -1,6 +1,7 @@
 package org.janelia.saalfeldlab.spark
 
 import gnu.trove.map.TLongObjectMap
+import gnu.trove.map.hash.TLongLongHashMap
 import gnu.trove.map.hash.TLongObjectHashMap
 import gnu.trove.set.TLongSet
 import gnu.trove.set.hash.TLongHashSet
@@ -19,8 +20,10 @@ import org.apache.commons.lang3.builder.ToStringBuilder
 import org.apache.commons.lang3.builder.ToStringStyle
 import org.apache.spark.SparkConf
 import org.apache.spark.api.java.JavaSparkContext
+import org.apache.spark.api.java.function.FlatMapFunction
 import org.apache.spark.api.java.function.Function
 import org.apache.spark.api.java.function.VoidFunction
+import org.apache.spark.broadcast.Broadcast
 import org.janelia.saalfeldlab.edge.feature.DoubleStatisticsFeature
 import org.janelia.saalfeldlab.edge.feature.Histogram
 import org.janelia.saalfeldlab.labels.Label
@@ -33,6 +36,8 @@ import java.lang.invoke.MethodHandles
 import java.nio.ByteBuffer
 import java.util.*
 import java.util.concurrent.Executors
+import kotlin.collections.HashMap
+import kotlin.math.min
 
 private val LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())
 
@@ -42,6 +47,8 @@ private fun MinMaxInterval.min() = _1()
 private fun MinMaxInterval.max() = _2()
 private fun MinMaxInterval.interval() = FinalInterval(min(), max())
 private fun MinMaxInterval.size() = Intervals.dimensionsAsLongArray(interval())
+
+private fun asMinMaxInterval(interval: Interval) = MinMaxInterval(Intervals.minAsLongArray(interval), Intervals.maxAsLongArray(interval))
 
 class N5IO(
         val featureBlockContainer: N5Writer,
@@ -105,12 +112,12 @@ class BlockwiseEdgeFeatures {
 
                         Grids.collectAllContainedIntervals(it._1(), it._2(), blockSize).forEach { block ->
                             val blockPos = LongArray(grid.numDimensions())
-                            LOG.debug("Extracting features for block {} inside superblock ({} {})", block, it.min(), it.max())
+                            LOG.debug("Extracting features for block {} inside super-block ({} {})", block, it.min(), it.max())
                             block.min(blockPos)
                             grid.getCellPosition(blockPos, blockPos)
                             val edgeFeatures = DoubleStatisticsFeature.addAll(weights, labels, block, features = *features)
                             edgeFeatures.forEachEntry { key, values -> edgeMap.computeIfAbsent(key) { TLongHashSet() }.addAll(values.keySet()); true }
-                            LOG.debug("Edge features: {}", edgeFeatures)
+                            LOG.info("Edge features {} in block {}", edgeFeatures, block)
                             // TLongObjectHashMap$KeyView does not have closing curly brace in string representation!!
                             LOG.debug("Edge map: {}", edgeMap)
 
@@ -174,6 +181,61 @@ class BlockwiseEdgeFeatures {
             }
         }
 
+        fun mergeFeaturesWithTreeAggregate(
+                sc: JavaSparkContext,
+                n5io: () -> N5IO,
+                vararg features: () -> DoubleStatisticsFeature<*>,
+                blocksPerSuperBlock: IntArray? = null,
+                numEdgesPerBlock: Int = 1 shl 16) {
+            n5io().let { n5 ->
+                val featureBlockAttributes = n5.featureBlockContainer.getDatasetAttributes(n5.featureBlockDataset)
+                blocksPerSuperBlock?.let { require(featureBlockAttributes.numDimensions == it.size) { "Invalid blocks per super blocks ${Arrays.toString(blocksPerSuperBlock)} for ${featureBlockAttributes.numDimensions} dimensions" } }
+                val superBlockSize = ((blocksPerSuperBlock
+                        ?: IntArray(featureBlockAttributes.numDimensions) { 1 }) zip featureBlockAttributes.blockSize).map { it.first * it.second }.toIntArray()
+                val edgeDatasetAttributes = n5.edgesContainer.getDatasetAttributes(n5.edgesDataset)
+                val numFeaturesDoubles = features.map { it().packedSizeInDoubles() }.sum()
+                val numEdges = edgeDatasetAttributes.dimensions[1]
+                n5.mergedFeaturesContainer.createDataset(n5.mergedFeaturesDataset, longArrayOf(numFeaturesDoubles.toLong(), numEdges), intArrayOf(numFeaturesDoubles, numEdgesPerBlock), DataType.FLOAT64, GzipCompression())
+
+                val blockSize = featureBlockAttributes.blockSize
+                val edgeIndexLookupBC = sc.broadcast(Views.flatIterable(N5Utils.open<UnsignedLongType>(n5.edgesContainer, n5.edgesDataset)).cursor().let { edgeCursor ->
+                    val edgeIndexLookup = TLongObjectHashMap<TLongLongHashMap>()
+                    var index = 0L
+                    while (edgeCursor.hasNext()) {
+                        edgeIndexLookup.computeIfAbsent(edgeCursor.next().integerLong, { TLongLongHashMap() }).put(edgeCursor.next().integerLong, index)
+                        ++index
+                    }
+                    edgeIndexLookup
+                })
+
+                val numFeaturesBytes = features.map { it().numBytes() }.sum()
+
+                val superBlocks = Grids.collectAllContainedIntervals(featureBlockAttributes.dimensions, superBlockSize).map { asMinMaxInterval(it) }
+                sc
+                        .parallelize(superBlocks)
+                        .map(ReadFeatureBlocksIntoMap(n5io, edgeIndexLookupBC, *features))
+                        .flatMap(FlatMapEdgeFeatureMap(numEdgesPerBlock))
+                        .mapToPair { entry -> Tuple2(entry.key, entry.value) }
+                        .reduceByKey { statsMap1, statsMap2 ->
+                            val statsMap = TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>()
+                            statsMap1.forEachEntry { k, v -> statsMap.put(k, v.map { it.copy() }); true }
+                            statsMap2.forEachEntry { k, v ->
+                                val v1 = statsMap[k]
+                                if (v1 == null)
+                                    statsMap.put(k, v.map { it.copy() })
+                                else
+                                    (v1 zip v).forEach { it.first.plusUnsafeAssign(it.second) }
+                                true
+                            }
+                            LOG.info("Returning stats map {}", statsMap)
+                            statsMap
+                        }
+                        .foreach(WriteEdgeFeatures(n5io, numEdgesPerBlock, numEdges, *features))
+            }
+        }
+
+
+        @Deprecated(message = "This seems to be slow", replaceWith = ReplaceWith("mergeFeaturesWithTreeAggregate(sc, n5io, features, numEdgesPerBlock)"))
         fun mergeFeatures(
                 sc: JavaSparkContext,
                 n5io: () -> N5IO,
@@ -276,6 +338,93 @@ class ExtractEdges(
 
 }
 
+class ReadFeatureBlocksIntoMap(
+        private val n5io: () -> N5IO,
+        private val edgeIndexLookupBC: Broadcast<TLongObjectHashMap<TLongLongHashMap>>,
+        private vararg val features: () -> DoubleStatisticsFeature<*>) : Function<MinMaxInterval, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>> {
+
+    private val numFeaturesBytes: Int = this.features.map { it().numBytes() }.sum()
+
+
+    override fun call(superBlock: MinMaxInterval): TLongObjectHashMap<List<DoubleStatisticsFeature<*>>> {
+        val blockPos = superBlock.min().clone()
+        val edgeIndexLookup = edgeIndexLookupBC.value
+        return n5io().let { n5 ->
+            val attributes = n5.featureBlockContainer.getDatasetAttributes(n5.featureBlockDataset)
+            LOG.debug("Attributes: {}", attributes)
+            val grid = CellGrid(attributes.dimensions, attributes.blockSize)
+            val edgeFeatureMap = TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>()
+            LOG.debug("Iterating over all blocks of size {} in ({} {})", attributes.blockSize, superBlock.min(), superBlock.max())
+            Grids.forEachOffset(superBlock.min(), superBlock.max(), attributes.blockSize) { block ->
+                grid.getCellPosition(block, blockPos)
+                val dataBlock = n5.featureBlockContainer.readBlock(n5.featureBlockDataset, attributes, blockPos) as ByteArrayDataBlock
+                val buffer = ByteBuffer.wrap(dataBlock.data)
+                while (buffer.hasRemaining()) {
+                    val e1 = buffer.long
+                    val e2 = buffer.long
+                    LOG.debug("Looking up ({} {}) in {}", e1, e2, edgeIndexLookup)
+                    val edgeIndex = edgeIndexLookup[e1][e2]
+                    val deserializedFeatures = features.map { it().let {it.deserializeFrom(buffer); it} }
+                    LOG.debug("De-serialized features into {} for edge ({} {}) in block {}", deserializedFeatures, e1, e2, block)
+                    edgeFeatureMap.put(edgeIndex, deserializedFeatures)
+                }
+            }
+            edgeFeatureMap
+        }
+    }
+
+    companion object {
+        private val LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())
+    }
+
+}
+
+class FlatMapEdgeFeatureMap(private val numEdgesPerBlock: Int) : FlatMapFunction<TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>, Map.Entry<Long, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>> {
+    override fun call(edgeFeatureMap: TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>): Iterator<Map.Entry<Long, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>> {
+        val blockMinToEdgeFeatureMapping = HashMap<Long, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>()
+        edgeFeatureMap.forEachEntry { edgeIndex, features ->
+            val blockMin = edgeIndex / numEdgesPerBlock * numEdgesPerBlock
+            val offsetWithinBlock = edgeIndex - blockMin
+            blockMinToEdgeFeatureMapping.computeIfAbsent(blockMin) {TLongObjectHashMap()}.put(offsetWithinBlock, features)
+            true
+        }
+        return blockMinToEdgeFeatureMapping.iterator()
+    }
+
+
+    companion object {
+        private val LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass())
+    }
+
+
+}
+
+class WriteEdgeFeatures(
+        private val n5io: () -> N5IO,
+        private val numEdgesPerBlock: Int,
+        private val numEdges: Long,
+        vararg features: () -> DoubleStatisticsFeature<*>) : VoidFunction<Tuple2<Long, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>> {
+
+    private val numFeaturesDoubles = features.map { it().packedSizeInDoubles() }.sum()
+
+    override fun call(blockMinAndData: Tuple2<Long, TLongObjectHashMap<List<DoubleStatisticsFeature<*>>>>) {
+        val blockMin = blockMinAndData._1()
+        val blockMax = min(blockMin + numEdgesPerBlock, numEdges) - 1
+        val featureMap = blockMinAndData._2()
+        val featureRai = ArrayImgs.doubles(numFeaturesDoubles.toLong(), blockMax - blockMin + 1)
+        LOG.info("Created store {} for edge features of size {} {}", featureRai, numFeaturesDoubles, blockMax - blockMin + 1)
+        require(featureMap.size().toLong() == blockMax - blockMin + 1) {"Expected ${blockMax - blockMin + 1} features but got ${featureMap.size()}"}
+        val validRange = 0..featureRai.max(1)
+        featureMap.forEachEntry { key, localFeatures ->
+            require(key in validRange) {"Edge index $key not in valid range $validRange"};
+            val target = Views.flatIterable(Views.hyperSlice(featureRai, 1, key)).cursor()
+            localFeatures.forEach { it.pack().serializeInto(target) }
+            LOG.info("Serialized {} to doubles", localFeatures)
+            true }
+        n5io().let { N5Utils.saveBlock(featureRai, it.mergedFeaturesContainer, it.mergedFeaturesDataset, longArrayOf(blockMin / numEdgesPerBlock, 0)) }
+    }
+}
+
 class MergeEdgeFeatures(
         val n5io: () -> N5IO,
         val numEdgesPerBlock: Int,
@@ -334,7 +483,7 @@ class MergeEdgeFeatures(
                 val featuresFor = edgeFeaturesList[index]
                 val target = Views.flatIterable(Views.hyperSlice(edgeFeatures, 1, index.toLong())).cursor()
                 LOG.info("Packing features {}", featuresFor)
-                featuresFor.forEach { LOG.info("Packing feature {}", it); it.pack().serializeInto(target) }
+                featuresFor.forEach { f -> LOG.info("Packing feature {}", f); f.pack().serializeInto(target) }
             }
 
             val targetAttributes = DatasetAttributes(longArrayOf(numDoubles.toLong(), numEdges), intArrayOf(numDoubles, numEdgesPerBlock), DataType.FLOAT64, GzipCompression())
